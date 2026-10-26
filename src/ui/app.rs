@@ -249,8 +249,9 @@ impl App {
     /// Move boundary for the focused parameter field.
     pub fn adjust_param(&mut self, delta_ms: f64) {
         self.push_history();
+        let selected_param = self.selected_param;
         if let Some(entry) = self.current_entry_mut() {
-            match self.selected_param {
+            match selected_param {
                 0 => entry.offset = (entry.offset + delta_ms).max(0.0),
                 1 => entry.preutterance = (entry.preutterance + delta_ms).max(0.0),
                 2 => entry.consonant = (entry.consonant + delta_ms).max(0.0),
@@ -543,34 +544,43 @@ impl App {
 
     fn apply_text_input(&mut self, text: &str) {
         self.push_history();
-        if let Some(entry) = self.current_entry_mut() {
-            match self.selected_param {
-                5 => {
-                    // Alias editing
+        let selected_param = self.selected_param;
+        let Some(idx) = self.current_entry_index() else {
+            return;
+        };
+
+        let mut status: Option<(String, bool)> = None;
+        if let Some(ini) = &mut self.oto {
+            if let Some(entry) = ini.entries.get_mut(idx) {
+                if selected_param == 5 {
                     entry.alias = text.to_string();
-                }
-                _ => {
-                    if let Ok(val) = text.trim().parse::<f64>() {
-                        match self.selected_param {
-                            0 => entry.offset = val.max(0.0),
-                            1 => entry.preutterance = val.max(0.0),
-                            2 => entry.consonant = val.max(0.0),
-                            3 => entry.cutoff = val,
-                            4 => entry.overlap = val.max(0.0),
-                            _ => {}
-                        }
-                        if let Some(ini) = &mut self.oto {
+                    ini.dirty = true;
+                } else {
+                    match text.trim().parse::<f64>() {
+                        Ok(val) => {
+                            match selected_param {
+                                0 => entry.offset = val.max(0.0),
+                                1 => entry.preutterance = val.max(0.0),
+                                2 => entry.consonant = val.max(0.0),
+                                3 => entry.cutoff = val,
+                                4 => entry.overlap = val.max(0.0),
+                                _ => {}
+                            }
                             ini.dirty = true;
+                            status = Some((format!("Set to {}", val), false));
                         }
-                        self.set_status(format!("Set to {}", val), false);
-                    } else {
-                        self.set_status(format!("Invalid number: {text}"), true);
+                        Err(_) => {
+                            status = Some((format!("Invalid number: {text}"), true));
+                        }
                     }
                 }
             }
         }
-    }
 
+        if let Some((msg, is_error)) = status {
+            self.set_status(msg, is_error);
+        }
+    }
     fn scroll_view(&mut self, delta_ms: f64) {
         let dur = self.view_end_ms - self.view_start_ms;
         let max_end = self.current_wav.as_ref().map_or(self.view_end_ms, |w| w.duration_ms);

@@ -7,7 +7,7 @@ authors = ["otoium contributors"]
 license = "MIT"
 
 [[bin]]
-name = "oto_assist"
+name = "otoium"
 path = "src/main.rs"
 
 [dependencies]

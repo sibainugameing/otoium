@@ -1,5 +1,5 @@
 <p align="center">
-    <img width="160" alt="Image" alt="Project Logo" src="https://github.com/user-attachments/assets/6decc58f-dfff-42c4-afb7-3e209b5c3bba" />
+    <img width="160" alt="Image" alt="Project Logo" src="https://github.com/user-attachments/assets/b02655c4-4810-4852-9c9d-fc59c1e0b6d3" />
 </p>
 # otoium
 

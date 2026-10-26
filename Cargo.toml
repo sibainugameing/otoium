@@ -1,9 +1,9 @@
 [package]
-name = "oto_assist"
+name = "otoium"
 version = "0.1.0"
 edition = "2021"
 description = "UTAU voicebank oto.ini editor with TUI waveform display"
-authors = ["OTO Assist contributors"]
+authors = ["otoium contributors"]
 license = "MIT"
 
 [[bin]]

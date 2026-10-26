@@ -1,5 +1,8 @@
+<p align="center">
+    <img width="48" height="48" alt="Image" src="https://github.com/user-attachments/assets/6decc58f-dfff-42c4-afb7-3e209b5c3bba" />
+</p>
 # otoium
-<<<<<<< HEAD
+
 for utau oto.ini
 
 # OTO Assist

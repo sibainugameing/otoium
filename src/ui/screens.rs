@@ -113,7 +113,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("OTO Assist", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("otoium", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(format!(" | Project: {project_name}{dirty_marker}")),
         ]),
         Line::from(format!(

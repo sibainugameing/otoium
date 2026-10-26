@@ -126,7 +126,7 @@ pub fn status_bar_help(pane: &str) -> &'static str {
 
 /// Full help text for the help screen.
 pub const HELP_TEXT: &str = r#"
-OTO Assist – Keyboard Reference
+otoium – Keyboard Reference
 ═══════════════════════════════
 
 NAVIGATION

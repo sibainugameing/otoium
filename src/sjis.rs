@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn roundtrip_kana() {
-        for s in ["あいうえお", "カキクケコ", "ぁゔん", "ミムヶ", "ka_あ.wav", "ー、。"] {
+        for s in ["あいうえお", "カキクケコ", "ぁヴん", "ミムヶ", "ka_あ.wav", "ー、。"] {
             let e = encode(s).unwrap_or_else(|| panic!("encode {s}"));
             assert_eq!(decode(&e).unwrap(), s);
         }

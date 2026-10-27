@@ -4,9 +4,8 @@ Fully automatic UTAU `oto.ini` generator in Rust. **This drop contains the inter
 (waveform view, playback, manual editing) is deliberately deferred.**
 
 > ## ⚠ Verification status
-> * **Never compiled.** The authoring environment had no Rust toolchain and no network. Expect compile errors;
->   fix them with `cargo build` first. A crude bracket-balance check and manual review were the only checks.
-> * **No test has been run.** Tests exist (see `docs/testing.md`) but their results are unknown.
+> * **Compiles on macOS (user-reported)**; written without a toolchain, so only the user's build has verified this. Ubuntu not tried.
+> * **Tests:** 43/46 passed on the first user run; the 3 failures were diagnosed and patched but the re-run is unconfirmed (see `docs/testing.md`).
 > * **No accuracy has been measured.** There was no ground-truth data. `docs/accuracy.md` contains a protocol, not results.
 > * **No research was performed** on Moresampler / OpenMoresampler (network disabled). `docs/research.md` lists what must be verified.
 

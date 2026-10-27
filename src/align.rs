@@ -72,6 +72,16 @@ fn proto(k: K, voiced: bool) -> [f64; 4] {
     }
 }
 
+/// Per-kind multipliers on the feature weights. Silence and closures are judged mainly by energy:
+/// room noise is broadband, so its HF ratio / flux look like a fricative and must not drive the decision.
+fn kind_weight(k: K) -> [f64; 4] {
+    match k {
+        K::Sil => [3.0, 0.3, 0.0, 0.0],
+        K::Closure => [2.0, 1.0, 0.3, 0.2],
+        _ => [1.0, 1.0, 1.0, 1.0],
+    }
+}
+
 fn min_ms(k: K) -> f64 {
     match k {
         K::Sil => 1.0,
@@ -176,11 +186,12 @@ impl Aligner for AcousticAligner {
         let w = self.w;
         let emit = |ti: usize, e: &Elem| -> f64 {
             let p = proto(e.kind, e.voiced);
+            let kw = kind_weight(e.kind);
             let f = &feats[ti];
             let mut s = 0.0;
             for k in 0..4 {
                 let d = f[k] - p[k];
-                s += w[k] * d * d;
+                s += w[k] * kw[k] * d * d;
             }
             s
         };

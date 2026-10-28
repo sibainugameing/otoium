@@ -1,0 +1,92 @@
+/* UTAU 原音設定ツール TUI スタイル */
+
+Screen {
+    background: $surface;
+}
+
+#main {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* --- 設定パネル --- */
+#settings-panel {
+    height: auto;
+    border: solid $accent;
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+.label {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+.section-label {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+Input {
+    margin-bottom: 1;
+}
+
+RadioSet {
+    margin-bottom: 1;
+}
+
+#action-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+#action-buttons Button {
+    margin-right: 2;
+}
+
+/* --- 進捗パネル --- */
+#progress-panel {
+    height: auto;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#progress-label {
+    color: $text-muted;
+}
+
+ProgressBar {
+    width: 1fr;
+}
+
+/* --- 結果テーブル --- */
+#result-panel {
+    height: 1fr;
+    border: solid $primary;
+    padding: 1;
+    margin-bottom: 1;
+}
+
+ResultTable {
+    height: 1fr;
+}
+
+/* --- ログペイン --- */
+#log-panel {
+    height: 8;
+    border: solid $secondary;
+    padding: 0 1;
+}
+
+LogPane {
+    height: 1fr;
+}
+
+/* --- ステータスバー --- */
+StatusBar {
+    height: 1;
+    background: $primary;
+    color: $text;
+    dock: bottom;
+}

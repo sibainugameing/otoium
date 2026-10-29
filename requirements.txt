@@ -1,4 +1,4 @@
-# UTAU 原音設定自動化ツール 依存ライブラリ
+# otoium 依存ライブラリ
 
 # Audio processing
 soundfile>=0.12.1

@@ -1,14 +1,13 @@
 """
 メイン処理パイプライン
-音源フォルダの読み込みから oto.ini 生成までを一貫して管理する
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Optional
 
 from analysis.wav_loader import WavLoader
 from analysis.feature_extractor import FeatureExtractor
@@ -26,56 +25,57 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     input_dir: Path
     output_dir: Optional[Path] = None
-    format_hint: str = "auto"          # "cv" | "vcv" | "auto"
-    confidence_threshold: float = 0.6  # これ以下は低信頼度として警告
-    overwrite_existing: bool = False   # 既存 oto.ini を上書きするか
+    format_hint: str = "auto"
+    confidence_threshold: float = 0.52
+    overwrite_existing: bool = False
 
 
 class Pipeline:
-    """
-    WAV → 特徴抽出 → 境界推定 → パラメータ計算 → oto.ini 出力
-    の一連の処理をファイル単位で実行する。
-    """
 
     def __init__(
         self,
-        input_dir: Path,
+        input_dir: Optional[Path] = None,
         format_hint: str = "auto",
         output_dir: Optional[Path] = None,
         config: Optional[PipelineConfig] = None,
     ):
-        self.config = config or PipelineConfig(
-            input_dir=input_dir,
-            output_dir=output_dir,
-            format_hint=format_hint,
-        )
-        self.wav_loader = WavLoader()
+        if config is not None:
+            self.config = config
+        elif input_dir is not None:
+            self.config = PipelineConfig(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                format_hint=format_hint,
+            )
+        else:
+            raise ValueError("input_dir か config のどちらかを指定してください")
+
+        self.wav_loader        = WavLoader()
         self.feature_extractor = FeatureExtractor()
         self.boundary_estimator = BoundaryEstimator()
-        self.format_detector = FormatDetector()
-        self.oto_writer = OtoWriter()
+        self.format_detector   = FormatDetector()
+        self.oto_writer        = OtoWriter()
+        self._folder_format: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # 公開インターフェース
     # ------------------------------------------------------------------
 
     def run(
         self,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> list[ProcessResult]:
-        """
-        音源フォルダ内の全 WAV を処理して oto.ini を生成する。
-
-        progress_callback(current, total, filename) が渡された場合、
-        ファイルごとに呼び出される（TUI 向け）。
-        """
-        wav_files = self._collect_wav_files()
+        wav_files = sorted(self.config.input_dir.glob("*.wav"))
         if not wav_files:
             logger.warning(f"WAV ファイルが見つかりません: {self.config.input_dir}")
             return []
 
-        total = len(wav_files)
+        if self.config.format_hint == "auto":
+            self._folder_format = self.format_detector.detect_folder(self.config.input_dir)
+            logger.info(f"形式自動判定: {self._folder_format.upper()}")
+        else:
+            self._folder_format = self.config.format_hint
+
         results: list[ProcessResult] = []
+        total = len(wav_files)
 
         for i, wav_path in enumerate(wav_files):
             if progress_callback:
@@ -87,89 +87,76 @@ class Pipeline:
             else:
                 logger.warning(f"NG  {wav_path.name}: {result.error}")
 
-        # 最後にまとめて oto.ini を書き出す（フォルダ単位）
         self._write_oto(results)
-
         if progress_callback:
             progress_callback(total, total, "完了")
-
         return results
 
     def reprocess(self, wav_path: Path) -> ProcessResult:
-        """単一ファイルを再処理する（TUI での個別再解析用）"""
+        if self._folder_format is None:
+            self._folder_format = (
+                self.format_detector.detect_folder(self.config.input_dir)
+                if self.config.format_hint == "auto"
+                else self.config.format_hint
+            )
         result = self._process_one(wav_path)
         if result.success:
-            self._write_oto([result], append=True)
+            self._update_oto_entry(result)
         return result
 
     # ------------------------------------------------------------------
-    # 内部処理
-    # ------------------------------------------------------------------
-
-    def _collect_wav_files(self) -> list[Path]:
-        return sorted(self.config.input_dir.glob("*.wav"))
 
     def _process_one(self, wav_path: Path) -> ProcessResult:
         try:
-            # 1. WAV 読み込み
-            wav = self.wav_loader.load(wav_path)
-
-            # 2. 音源形式の判定
-            fmt = self._detect_format(wav_path)
-
-            # 3. 音響特徴抽出
+            wav      = self.wav_loader.load(wav_path)
+            fmt      = self._folder_format or self.format_detector.detect(wav_path)
             features = self.feature_extractor.extract(wav)
 
-            # 4. 音素境界推定（形式別）
-            if fmt == "vcv":
-                processor = VCVProcessor(self.boundary_estimator)
-            else:
-                processor = CVProcessor(self.boundary_estimator)
-
+            processor = (
+                VCVProcessor(self.boundary_estimator)
+                if fmt == "vcv"
+                else CVProcessor(self.boundary_estimator)
+            )
             params, confidence = processor.estimate(wav_path, wav, features)
-
-            # 5. 信頼度チェック
-            low_confidence = confidence < self.config.confidence_threshold
-
             return ProcessResult(
                 wav_path=wav_path,
                 format=fmt,
                 oto_params=params,
                 confidence=confidence,
-                low_confidence=low_confidence,
+                low_confidence=confidence < self.config.confidence_threshold,
                 success=True,
             )
-
         except Exception as exc:
             logger.exception(f"処理エラー: {wav_path.name}")
             return ProcessResult(
-                wav_path=wav_path,
-                format="unknown",
-                success=False,
-                error=str(exc),
+                wav_path=wav_path, format="unknown",
+                success=False, error=str(exc),
             )
 
-    def _detect_format(self, wav_path: Path) -> str:
-        if self.config.format_hint != "auto":
-            return self.config.format_hint
-        return self.format_detector.detect(wav_path)
-
     def _write_oto(self, results: list[ProcessResult], append: bool = False) -> None:
-        """成功した結果をフォルダごとにまとめて oto.ini に書き出す"""
-        # 出力先フォルダを決定
-        out_dir = self.config.output_dir or self.config.input_dir
-
+        out_dir    = self.config.output_dir or self.config.input_dir
         successful = [r for r in results if r.success and r.oto_params]
         if not successful:
             return
 
         output_path = out_dir / "oto.ini"
-
-        # 既存ファイルの保護
         if output_path.exists() and not self.config.overwrite_existing and not append:
             backup = output_path.with_suffix(".ini.bak")
             output_path.rename(backup)
-            logger.info(f"既存 oto.ini を {backup.name} にバックアップしました")
+            logger.info(f"既存 oto.ini → {backup.name}")
 
         self.oto_writer.write(output_path, successful, append=append)
-        logger.info(f"oto.ini を書き出しました: {output_path}")
+
+    def _update_oto_entry(self, result: ProcessResult) -> None:
+        out_dir     = self.config.output_dir or self.config.input_dir
+        output_path = out_dir / "oto.ini"
+        alias       = result.oto_params.alias if result.oto_params else None
+        if alias is None:
+            return
+        if not output_path.exists():
+            self.oto_writer.write(output_path, [result])
+            return
+        existing        = self.oto_writer.read_existing(output_path)
+        existing[alias] = result.oto_params.to_oto_line()
+        self.oto_writer.write_raw_lines(output_path, list(existing.values()))
+        logger.info(f"oto.ini 更新: {alias}")

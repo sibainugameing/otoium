@@ -1,6 +1,6 @@
 # UTAU 原音設定自動化ツール 依存ライブラリ
 
-# 音声処理
+# Audio processing
 soundfile>=0.12.1
 librosa>=0.10.0
 numpy>=1.24.0
@@ -9,10 +9,10 @@ scipy>=1.10.0
 # TUI
 textual>=0.47.0
 
-# テスト
+# test
 pytest>=7.4.0
 pytest-mock>=3.11.0
 
-# 将来のML統合（オプション）
+# For some future occasion
 # torch>=2.0.0
 # transformers>=4.30.0

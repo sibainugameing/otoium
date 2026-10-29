@@ -1,31 +1,39 @@
-/* UTAU 原音設定ツール TUI スタイル */
+/* otoium TUI スタイル */
 
 Screen {
     background: $surface;
 }
 
-#main {
-    height: 1fr;
-    padding: 0 1;
+Header {
+    background: $primary-darken-2;
 }
 
-/* --- 設定パネル --- */
-#settings-panel {
-    height: auto;
-    border: solid $accent;
+#wizard-body {
+    height: 1fr;
     padding: 1 2;
+    overflow-y: auto;
+}
+
+#step-label {
+    text-style: bold;
+    color: $accent;
     margin-bottom: 1;
 }
 
-.label {
+Rule {
+    margin: 1 0;
+    color: $primary-darken-1;
+}
+
+.field-label {
     color: $text-muted;
     margin-top: 1;
 }
 
-.section-label {
-    color: $accent;
-    text-style: bold;
-    margin-bottom: 1;
+.option-label {
+    color: $text;
+    width: 1fr;
+    content-align: left middle;
 }
 
 Input {
@@ -33,60 +41,81 @@ Input {
 }
 
 RadioSet {
+    height: auto;
     margin-bottom: 1;
 }
 
-#action-buttons {
-    height: auto;
-    margin-top: 1;
+RadioButton {
+    padding: 0 1;
 }
 
-#action-buttons Button {
+#options-row {
+    height: auto;
+    margin: 1 0;
+    align: left middle;
+}
+
+Switch {
+    margin-left: 2;
+}
+
+#nav-buttons {
+    height: auto;
+    margin-top: 2;
+}
+
+#nav-buttons Button {
     margin-right: 2;
 }
 
-/* --- 進捗パネル --- */
-#progress-panel {
-    height: auto;
-    padding: 0 1;
-    margin-bottom: 1;
-}
-
+/* Step 3 */
 #progress-label {
     color: $text-muted;
+    margin-bottom: 1;
 }
 
 ProgressBar {
     width: 1fr;
+    margin-bottom: 1;
 }
 
-/* --- 結果テーブル --- */
-#result-panel {
-    height: 1fr;
-    border: solid $primary;
-    padding: 1;
+/* Step 4 */
+#result-header {
+    height: auto;
+    align: left middle;
     margin-bottom: 1;
+}
+
+#result-header Button {
+    margin-right: 1;
+}
+
+#result-summary {
+    width: 1fr;
+    content-align: left middle;
 }
 
 ResultTable {
     height: 1fr;
-}
-
-/* --- ログペイン --- */
-#log-panel {
-    height: 8;
-    border: solid $secondary;
-    padding: 0 1;
+    min-height: 8;
 }
 
 LogPane {
-    height: 1fr;
+    height: 7;
+    border: solid $primary-darken-1;
 }
 
-/* --- ステータスバー --- */
-StatusBar {
-    height: 1;
-    background: $primary;
-    color: $text;
-    dock: bottom;
+/* Step 1 wav preview */
+#wav-preview {
+    height: 1fr;
+    min-height: 6;
+    border: solid $primary-darken-1;
+}
+
+#preview-label {
+    margin: 1 0;
+}
+
+DataTable {
+    height: 1fr;
 }

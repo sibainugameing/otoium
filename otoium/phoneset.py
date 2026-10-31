@@ -2,7 +2,8 @@
 N_CLS = 8
 DIM_NAMES = ["e_rel", "voi", "zcr", "hf", "lf", "cent", "f1", "f2"]
 N_MFCC = 12
-D = N_CLS + N_MFCC
+N_DELTA = 12
+D = N_CLS + N_MFCC + N_DELTA
 
 # クラス: (平均[8], 標準偏差[8], dmin_ms, dmax_ms, dmean_ms)
 #         e_rel(dB/10), voicing, zcr, hf比, lf比, 重心/8k, F1近似/1k, F2近似/3.2k

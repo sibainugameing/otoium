@@ -15,7 +15,7 @@ COLORS = {"V": "#4c9be8", "NN": "#6f7fe8", "N": "#9b6fe8", "S": "#e8a24c", "H": 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("otoium - 完全自動原音設定")
+        self.title("otoium")
         self.geometry("1100x700")
         self.q = queue.Queue()
         self.pipe = None
@@ -26,7 +26,7 @@ class App(tk.Tk):
         self.var_style = tk.StringVar(value="mora")
         self.var_enc = tk.StringVar(value="cp932")
         self.var_script = tk.StringVar()
-        self.var_iter = tk.IntVar(value=3)
+        self.var_iter = tk.StringVar(value="high")
         self.var_strict = tk.BooleanVar(value=False)
         self.var_dry = tk.BooleanVar(value=False)
         ttk.Label(top, text="原音フォルダ").grid(row=0, column=0, sticky="w")
@@ -44,8 +44,8 @@ class App(tk.Tk):
         ttk.Label(top, text="文字コード").grid(row=2, column=4)
         ttk.Combobox(top, textvariable=self.var_enc, values=["cp932", "utf-8"], width=8,
                      state="readonly").grid(row=2, column=5, sticky="w")
-        ttk.Label(top, text="学習回数").grid(row=3, column=0, sticky="w")
-        ttk.Spinbox(top, from_=1, to=10, textvariable=self.var_iter, width=5).grid(row=3, column=1, sticky="w")
+        ttk.Label(top, text="精度").grid(row=3, column=0, sticky="w")
+        ttk.Combobox(top, textvariable=self.var_iter, values=["fast", "high", "max"], width=8, state="readonly").grid(row=3, column=1, sticky="w")
         ttk.Checkbutton(top, text="厳格(WARNも除外)", variable=self.var_strict).grid(row=3, column=2, columnspan=2)
         ttk.Checkbutton(top, text="ドライラン", variable=self.var_dry).grid(row=3, column=4)
         self.btn = ttk.Button(top, text="自動原音設定を実行", command=self.start)
@@ -82,7 +82,7 @@ class App(tk.Tk):
             messagebox.showwarning("otoium", "フォルダを選択してください")
             return
         cfg = Config(mode=self.var_mode.get(), vcv_style=self.var_style.get(), encoding=self.var_enc.get(),
-                     script_path=self.var_script.get(), train_iters=self.var_iter.get(),
+                     script_path=self.var_script.get(), accuracy=self.var_iter.get(),
                      strict=self.var_strict.get(), dry_run=self.var_dry.get())
         self.btn.state(["disabled"])
         self.lst.delete(0, "end")

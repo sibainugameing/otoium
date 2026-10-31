@@ -110,14 +110,16 @@ def build_timings(segs, morae, hop_ms, dur_ms):
         ss = [s for s in real if s.mora == mi]
         if not ss:
             raise ValueError(f"モーラ {mi} が空区間になりました")
-        cs, vs, ve = ms(ss[0].s), ms(ss[-1].s), ms(ss[-1].e)
+        st = lambda g: ms(g.s) if g.s_ms is None else float(min(max(0.0, g.s_ms), dur_ms))
+        en = lambda g: ms(g.e) if g.e_ms is None else float(min(max(0.0, g.e_ms), dur_ms))
+        cs, vs, ve = st(ss[0]), st(ss[-1]), en(ss[-1])
         cons_end_vc = None
         cons = [s for s in ss if s.kind == "c"]
         if cons:
             bursts = [s for s in cons if is_burst(s.unit)]
-            cons_end_vc = ms(bursts[0].s) if bursts else cs + 0.8 * (vs - cs)
+            cons_end_vc = st(bursts[0]) if bursts else cs + 0.8 * (vs - cs)
             cons_end_vc = max(cons_end_vc, cs + 15.0)
-        t = MoraTiming(mi, m, [(s.unit, ms(s.s), ms(s.e)) for s in ss], cs, vs, ve, cons_end_vc,
+        t = MoraTiming(mi, m, [(s.unit, st(s), en(s)) for s in ss], cs, vs, ve, cons_end_vc,
                        max(0.0, cs - last_end),
                        v_frames=(ss[-1].s, ss[-1].e), c_frames=(ss[0].s, ss[-1].s))
         out.append(t)

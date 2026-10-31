@@ -12,7 +12,19 @@ def format_entry(e):
     return f"{e.wav}={e.alias},{_n(e.offset)},{_n(e.consonant)},{_n(e.cutoff)},{_n(e.pre)},{_n(e.overlap)}"
 
 
-def write_oto(path, entries, encoding="cp932", backup=True):
+def read_lines(path, encoding="cp932"):
+    path = Path(path)
+    if not path.exists():
+        return []
+    for enc in (encoding, "utf-8", "cp932"):
+        try:
+            return [l for l in path.read_bytes().decode(enc).splitlines() if "=" in l]
+        except UnicodeDecodeError:
+            continue
+    return []
+
+
+def write_oto(path, entries, encoding="cp932", backup=True, extra_lines=()):
     path = Path(path)
     if backup and path.exists():
         bak = path.with_name(path.name + ".bak")
@@ -21,7 +33,8 @@ def write_oto(path, entries, encoding="cp932", backup=True):
             bak = path.with_name(f"{path.name}.bak{i}")
             i += 1
         shutil.copy2(path, bak)
-    text = "\n".join(format_entry(e) for e in entries) + ("\n" if entries else "")
+    lines = [format_entry(e) for e in entries] + list(extra_lines)
+    text = "\n".join(lines) + ("\n" if lines else "")
     try:
         data = text.encode(encoding)
     except UnicodeEncodeError as ex:

@@ -15,7 +15,12 @@ class Config:
     # ---- 解析 ----
     hop_ms: float = 5.0
     win_ms: float = 25.0
-    train_iters: int = 3        # 自己教師あり音響モデルの再推定回数
+    accuracy: str = "high"      # fast / high / max (学習回数・自動調整・救済の強さ)
+    train_iters: int = 0        # 0: accuracy の既定値
+    auto_tune: bool = None      # None: accuracy の既定値
+    rescue: bool = None
+    refine: bool = True         # 1ms 精度の境界微調整
+    delta_weight: float = 0.25
     mfcc_weight: float = 0.35
     boundary_weight: float = 4.0
     duration_weight: float = 0.5
@@ -42,6 +47,19 @@ class Config:
     model_path: str = ""        # 学習済みモデルの読込
     save_model: bool = True
     export_labels: bool = False  # Audacity ラベルを書き出す
+    textgrid: bool = False
+    merge: bool = False         # 既存 oto.ini の未処理ファイル分を残す
+    alias_prefix: str = ""
+    alias_suffix: str = ""
+    jobs: int = 1
+    cache: bool = True
 
     def to_dict(self):
         return asdict(self)
+
+
+PRESETS = {
+    "fast": dict(iters=3, tune=False, rounds=0, rescue=False),
+    "high": dict(iters=5, tune=True, rounds=1, rescue=True),
+    "max": dict(iters=8, tune=True, rounds=2, rescue=True),
+}

@@ -29,6 +29,8 @@ class Seg:
     s: int
     e: int
     bconf: float = 1.0
+    s_ms: float = None   # 微調整後の開始時刻(ms)
+    e_ms: float = None
 
 
 def build_tokens(morae, T, hop_ms, cfg):

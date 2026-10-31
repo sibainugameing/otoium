@@ -114,6 +114,33 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
         for t in full:
             parse_text(t)
 
+    def test_noisy_and_pitch_conditions(self):
+        for kw in (dict(f0=220.0), dict(f0=90.0)):
+            with tempfile.TemporaryDirectory() as d:
+                for i, t in enumerate(BANK):
+                    x, _ = render(t, seed=i, **kw)
+                    write_wav(Path(d) / f"{t}.wav", x)
+                p, rep = run(d, mode="vcv")
+                self.assertEqual(rep["failed"], 0, kw)
+                self.assertEqual([a[0] for a in read_oto(d)["_あかさたな.wav"]], ["あ", "あ か", "か さ", "さ た", "た な"])
+
+    def test_truncated_recording_rescue(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            x, _ = render("_あかさ", seed=91)            # 名前は5モーラだが録音は3モーラ
+            write_wav(Path(d) / "_あかさたな2.wav", x)
+            p, rep = run(d, mode="vcv")
+            f = [f for f in rep["files"] if f["file"] == "_あかさたな2.wav"][0]
+            self.assertNotEqual(f["status"], "FAIL")
+            self.assertEqual(len(f["morae"]), 3)
+
+    def test_fast_preset_and_options(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            run(d, mode="cvvc", accuracy="fast", alias_prefix="", merge=True, textgrid=True, export_labels=True)
+            self.assertTrue((Path(d) / "_あかさたな.TextGrid").exists())
+            self.assertTrue((Path(d) / "otoium_model.npz").exists())
+
     def test_whole_8mora_script_parses(self):
         path = Path(__file__).resolve().parents[1] / "scripts" / "8mora.txt"
         for line in path.read_text(encoding="utf-8").split():

@@ -1,6 +1,7 @@
 """tkinter GUI: 設定 / 結果 (波形・音素境界・oto パラメータの可視化) / ログ"""
 import json
 import os
+from dataclasses import replace
 import queue
 import subprocess
 import sys
@@ -240,13 +241,13 @@ class App(tk.Tk):
         for k, v in str_vars.items():
             self.V[k] = tk.StringVar(value=v)
         self.V["jobs"] = tk.IntVar(value=1)
-        for k in ("add_tail", "strict", "dry_run", "merge", "textgrid", "export_labels"):
+        for k in ("add_tail", "strict", "dry_run", "merge", "textgrid", "export_labels", "write_failed"):
             self.V[k] = tk.BooleanVar(value=False)
-        for k in ("refine", "tune", "rescue", "net", "adapt", "auto_thresholds", "recursive", "backup", "dedupe", "cache"):
+        for k in ("refine", "tune", "rescue", "net", "adapt", "auto_thresholds", "recursive", "backup", "dedupe", "cache", "partial_repair"):
             self.V[k] = tk.BooleanVar(value=True)
         for k in ("thr_contrast", "thr_bnd", "ok_agree", "fail_agree", "cons_review", "cons_warn"):
             self.V[k] = tk.DoubleVar(value=getattr(d, k))
-        for k, val in dict(c_iters=5, c_rounds=1, c_epochs=10, c_ens=1, c_adapt=1, c_post=2, c_conf=0).items():
+        for k, val in dict(c_patience=2, c_iters=5, c_rounds=1, c_epochs=10, c_ens=1, c_adapt=1, c_post=2, c_conf=0).items():
             self.V[k] = tk.IntVar(value=val)
         self.V["mode_info"] = tk.StringVar(value="")
         self.V["recheck"] = tk.IntVar(value=3)
@@ -259,7 +260,7 @@ class App(tk.Tk):
         if v["accuracy"] == "custom":
             custom = dict(train_iters=int(v["c_iters"]), tune_rounds=int(v["c_rounds"]), net_epochs=int(v["c_epochs"]),
                           net_ensemble=int(v["c_ens"]), adapt_rounds=int(v["c_adapt"]), post_iters=int(v["c_post"]),
-                          confident_rounds=int(v["c_conf"]))
+                          confident_rounds=int(v["c_conf"]), patience=int(v["c_patience"]))
         return Config(
             **custom, mode=v["mode"], vcv_style=v["vcv_style"], vc_style=v["vc_style"], head_prefix=v["head_prefix"],
             add_tail=v["add_tail"], encoding=v["encoding"], accuracy=v["accuracy"], script_path=v["script"],
@@ -270,7 +271,8 @@ class App(tk.Tk):
             strict=v["strict"], dry_run=v["dry_run"], merge=v["merge"], textgrid=v["textgrid"],
             export_labels=v["export_labels"], alias_prefix=v["alias_prefix"], alias_suffix=v["alias_suffix"],
             jobs=max(1, int(v["jobs"] or 1)), recursive=v["recursive"], backup=v["backup"], dedupe=v["dedupe"],
-            cache=v["cache"], recheck_rounds=int(v["recheck"]))
+            cache=v["cache"], recheck_rounds=int(v["recheck"]), write_failed=v["write_failed"],
+            partial_repair=v["partial_repair"])
 
     # ---------------- 画面 ----------------
     def _build_top(self):
@@ -341,7 +343,8 @@ class App(tk.Tk):
         self.custom_widgets = []
         spec = [("学習回数", "c_iters", 1, 50), ("自動調整の周回", "c_rounds", 0, 10), ("NNエポック", "c_epochs", 1, 100),
                 ("NNアンサンブル数", "c_ens", 1, 8), ("適応の反復", "c_adapt", 0, 10), ("調整後の再学習", "c_post", 0, 20),
-                ("高信頼再学習の周回", "c_conf", 0, 10)]
+                ("高信頼再学習の周回", "c_conf", 0, 10),
+                ("収束の我慢回数(0=早期終了なし)", "c_patience", 0, 10)]
         for i, (lab, key, lo, hi) in enumerate(spec):
             ttk.Label(g5, text=lab).grid(row=i // 4, column=(i % 4) * 2, sticky="w", padx=(0, 6), pady=3)
             sp = ttk.Spinbox(g5, from_=lo, to=hi, textvariable=self.V[key], width=6)
@@ -363,6 +366,8 @@ class App(tk.Tk):
         self._check(g4, "ドライラン (ファイルを書かない)", "dry_run", 1, 0)
         self._check(g4, "TextGrid を出力", "textgrid", 2, 0)
         self._check(g4, "Audacity ラベルを出力", "export_labels", 3, 0)
+        self._check(g4, "失敗・保留も oto.ini に書き込む (otoium_forced.txt に一覧)", "write_failed", 4, 0)
+        self._check(g4, "失敗モーラ区間だけをやり直す", "partial_repair", 5, 0)
         bar = ttk.Frame(tab)
         bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=10)
         ttk.Button(bar, text="設定を保存…", command=self.save_settings).pack(side="left")
@@ -413,11 +418,29 @@ class App(tk.Tk):
         self.V["mode_info"].set(
             f"[{speed}] 学習 {p['iters']} 回 / 自動調整 {p['rounds'] if p['tune'] else 0} 周 / {nn} / "
             f"適応 {p['adapt_rounds'] if p['adapt'] else 0} 回 / 再学習 {p['post']} 回 / 高信頼再学習 {p['conf']} 周 / "
+            f"収束 {'早期終了なし' if p['patience'] == 0 else str(p['patience']) + '回連続で停止'} / "
             f"救済 {'あり' if p['rescue'] else 'なし'}")
 
     def _build_results(self):
         tab = ttk.Frame(self.nb, padding=6)
         self.nb.add(tab, text="結果")
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(0, 6))
+        self.act_buttons = []
+        for text, cmd in (("選択を再検査", self.recheck_selected), ("不合格をすべて再検査", self.recheck_all)):
+            b = ttk.Button(bar, text=text, command=cmd)
+            b.pack(side="left", padx=(0, 6))
+            self.act_buttons.append(b)
+        ttk.Label(bar, text="最大").pack(side="left")
+        ttk.Spinbox(bar, from_=1, to=10, textvariable=self.V["recheck"], width=4).pack(side="left", padx=2)
+        ttk.Label(bar, text="回").pack(side="left", padx=(0, 14))
+        ttk.Checkbutton(bar, text="失敗・保留も書き込む", variable=self.V["write_failed"]).pack(side="left")
+        ttk.Checkbutton(bar, text="厳格", variable=self.V["strict"]).pack(side="left", padx=6)
+        b = ttk.Button(bar, text="oto.ini に書き込む", style="Accent.TButton", command=self.write_now)
+        b.pack(side="left", padx=(6, 0))
+        self.act_buttons.append(b)
+        ttk.Label(bar, text="(エイリアス行のダブルクリックで、そのエイリアスを書く/書かないを個別に切替)",
+                  foreground="#777777").pack(side="left", padx=10)
         pw = ttk.PanedWindow(tab, orient="horizontal")
         pw.pack(fill="both", expand=True)
         left = ttk.Frame(pw)
@@ -429,7 +452,7 @@ class App(tk.Tk):
         cb.bind("<<ComboboxSelected>>", lambda e: self.populate())
         self.lbl_sum = ttk.Label(top, text="")
         self.lbl_sum.pack(side="right")
-        self.tree = ttk.Treeview(left, columns=("st", "file", "score"), show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(left, columns=("st", "file", "score"), show="headings", selectmode="extended")
         for c, t, w in (("st", "状態", 56), ("file", "ファイル", 230), ("score", "スコア", 56)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w")
@@ -454,14 +477,15 @@ class App(tk.Tk):
         nb2.pack(fill="both", expand=True)
         f_al = ttk.Frame(nb2)
         nb2.add(f_al, text="エイリアス")
-        cols = ("alias", "kind", "off", "cons", "cut", "pre", "ovl", "st")
+        cols = ("alias", "kind", "off", "cons", "cut", "pre", "ovl", "st", "out")
         self.t_al = ttk.Treeview(f_al, columns=cols, show="headings", selectmode="browse", height=8)
-        for c, t, w in zip(cols, ("エイリアス", "種別", "Offset", "Consonant", "Cutoff", "Preutterance", "Overlap", "状態"),
-                           (110, 55, 70, 80, 70, 90, 70, 70)):
+        for c, t, w in zip(cols, ("エイリアス", "種別", "Offset", "Consonant", "Cutoff", "Preutterance", "Overlap", "状態", "出力"),
+                           (110, 55, 70, 80, 70, 90, 70, 70, 60)):
             self.t_al.heading(c, text=t)
             self.t_al.column(c, width=w, anchor="w")
         self.t_al.pack(fill="both", expand=True)
         self.t_al.bind("<<TreeviewSelect>>", self.on_alias)
+        self.t_al.bind("<Double-1>", self.toggle_alias)
         for k, c in STATUS_FG.items():
             self.t_al.tag_configure(k, foreground=c)
         f_mo = ttk.Frame(nb2)
@@ -477,6 +501,7 @@ class App(tk.Tk):
             self.t_mo.tag_configure(k, foreground=c)
         pw.add(right, weight=4)
         self.shown = []
+        self.cur_job = None
 
     def _build_log(self):
         tab = ttk.Frame(self.nb, padding=6)
@@ -548,8 +573,7 @@ class App(tk.Tk):
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
         self.bar["value"] = 0
-        self.btn_run.state(["disabled"])
-        self.btn_stop.state(["!disabled"])
+        self._set_busy(True)
         for c in self.charts.values():
             c.clear()
         self.V["score_text"].set("検証スコア: -")
@@ -568,6 +592,62 @@ class App(tk.Tk):
         self.thread = threading.Thread(target=work, daemon=True)
         self.thread.start()
         self.nb.select(1)
+
+    def _set_busy(self, busy):
+        for b in self.act_buttons + [self.btn_run]:
+            b.state(["disabled"] if busy else ["!disabled"])
+        self.btn_stop.state(["!disabled"] if busy else ["disabled"])
+
+    def _bg(self, func, label):
+        """実行後の操作 (再検査・書き込み) をバックグラウンドで行う"""
+        if (self.thread and self.thread.is_alive()) or not self.pipe or not self.pipe.jobs:
+            messagebox.showinfo("otoium", "先に解析を実行してください")
+            return
+        self._set_busy(True)
+        self.V["stage"].set(label)
+
+        def work():
+            try:
+                self.q.put(("task_done", func()))
+            except Cancelled:
+                self.q.put(("cancel", None))
+            except Exception as ex:
+                self.q.put(("err", f"{type(ex).__name__}: {ex}"))
+
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+
+    def _recheck_task(self, jobs):
+        n = max(1, int(self.V["recheck"].get() or 3))
+        self.pipe.cfg = replace(self.pipe.cfg, write_failed=self.V["write_failed"].get(), strict=self.V["strict"].get())
+        total = len(jobs) if jobs is not None else sum(1 for j in self.pipe.jobs if self.pipe._is_bad(j))
+        fixed = self.pipe.recheck(jobs, n)
+        return {"kind": "recheck", "fixed": fixed, "total": total}
+
+    def recheck_selected(self):
+        if not self.pipe:
+            return self._bg(lambda: None, "")
+        jobs = [self.shown[int(i)] for i in self.tree.selection()]
+        if not jobs:
+            messagebox.showinfo("otoium", "再検査するファイルを左の一覧で選択してください")
+            return
+        self._bg(lambda: self._recheck_task(jobs), "再検査中…")
+
+    def recheck_all(self):
+        self._bg(lambda: self._recheck_task(None), "不合格をすべて再検査中…")
+
+    def write_now(self):
+        self._bg(lambda: {"kind": "write", "report": self.pipe.write_output(self.V["write_failed"].get(), self.V["strict"].get())},
+                 "oto.ini を書き込み中…")
+
+    def toggle_alias(self, event):
+        iid = self.t_al.identify_row(event.y)
+        if not iid or not self.pipe or self.cur_job is None:
+            return
+        e = self._entries[int(iid)]
+        now = self.pipe.decision(self.cur_job, e)
+        e.manual = False if now in ("✓", "強制") else True
+        self.t_al.set(iid, "out", self.pipe.decision(self.cur_job, e))
 
     def stop(self):
         if self.pipe:
@@ -588,9 +668,20 @@ class App(tk.Tk):
                     self.bar["value"] = v[0]
                 elif k == "metric":
                     self._on_metric(*v)
+                elif k == "task_done":
+                    self._set_busy(False)
+                    self.populate()
+                    if v and v["kind"] == "recheck":
+                        self.V["stage"].set(f"再検査完了: 解決 {v['fixed']} / 対象 {v['total']}")
+                        messagebox.showinfo("otoium", f"再検査: 対象 {v['total']} 件のうち {v['fixed']} 件で不合格箇所が解消しました。\n"
+                                                      "反映するには「oto.ini に書き込む」を押してください。")
+                    elif v and v["kind"] == "write":
+                        r = v["report"]
+                        self.V["stage"].set("書き込み完了")
+                        messagebox.showinfo("otoium", f"oto.ini に {r['entries_written']} 件を書き込みました "
+                                                      f"(強制 {r.get('entries_forced', 0)} / 保留 {r['entries_review']})")
                 elif k in ("done", "cancel", "err"):
-                    self.btn_run.state(["!disabled"])
-                    self.btn_stop.state(["disabled"])
+                    self._set_busy(False)
                     if k == "done":
                         self.V["stage"].set("完了")
                         self.populate()
@@ -606,6 +697,7 @@ class App(tk.Tk):
 
     # ---------------- 結果表示 ----------------
     def populate(self):
+        keep = [self.shown[int(i)].path for i in self.tree.selection()] if self.shown else []
         self.tree.delete(*self.tree.get_children())
         if not self.pipe:
             return
@@ -617,6 +709,11 @@ class App(tk.Tk):
             self.shown.append(j)
             self.tree.insert("", "end", iid=str(len(self.shown) - 1), values=(j.status, j.path.name, f"{j.score:.2f}"),
                              tags=(j.status,))
+        sel = [str(i) for i, j in enumerate(self.shown) if j.path in keep]
+        if sel:
+            self.tree.selection_set(sel)
+            self.tree.see(sel[0])
+            self.on_select()
         r = self.pipe.report
         if r:
             self.lbl_sum.configure(text=f"{r['total']} 件 / 失敗 {r['failed']} / 警告 {r['warned']} / oto {r['entries_written']} 件")
@@ -632,10 +729,11 @@ class App(tk.Tk):
         self.t_al.delete(*self.t_al.get_children())
         self.t_mo.delete(*self.t_mo.get_children())
         self._entries = j.entries
+        self.cur_job = j
         for i, e in enumerate(j.entries):
             self.t_al.insert("", "end", iid=str(i), tags=(e.status,),
                              values=(e.alias, e.kind, f"{e.offset:.1f}", f"{e.consonant:.1f}", f"{e.cutoff:.1f}",
-                                     f"{e.pre:.1f}", f"{e.overlap:.1f}", e.status))
+                                     f"{e.pre:.1f}", f"{e.overlap:.1f}", e.status, self.pipe.decision(j, e)))
         for t in j.timings:
             self.t_mo.insert("", "end", tags=(t.status,),
                              values=(t.mora.surface, t.rec_vowel, f"{t.agree_v:.2f}", f"{t.cons_agree:.2f}",

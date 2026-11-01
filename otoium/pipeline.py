@@ -11,10 +11,10 @@ from .audio_io import read_wav
 from .config import resolve
 from .features import extract, SilentAudioError, Features
 from .model import AcousticModel
-from .aligner import align, AlignmentError
+from .aligner import align, align_region, AlignmentError
 from .kana import parse_text, TextParseError
 from .verify import STATUS_RANK
-from .evaluate import evaluate
+from .evaluate import evaluate, evaluate_segs
 from .metrics import Tracker
 from .tune import autotune
 from .calibrate import calibrate
@@ -161,6 +161,40 @@ class Pipeline:
         self.review = {}
         self.dropped = []
         self.kept = {}
+        self.forced = {}
+        self._backed_up = set()
+
+    def decision(self, j, e):
+        """このエントリが今の設定で oto.ini に書かれるか: '✓' 書く / '強制' 不合格だが書く / '✗' 書かない (重複整理は含まない)"""
+        limit = 0 if self.cfg.strict else 1
+        over = j.status == "FAIL" or STATUS_RANK[e.status] > limit
+        if e.manual is False:
+            return "✗"
+        if e.manual is True:
+            return ("強制" if over else "✓") if e.valid else "✗"
+        if j.status == "FAIL" and not self.cfg.write_failed:
+            return "✗"
+        if not over:
+            return "✓"
+        return "強制" if (self.cfg.write_failed and e.valid) else "✗"
+
+    def recheck(self, jobs=None, rounds=None):
+        """実行後の再検査 (GUI から呼ぶ)。jobs 省略で不合格箇所のある全ファイル。解決したファイル数を返す"""
+        self.cancelled = False
+        targets = list(jobs) if jobs is not None else [j for j in self.jobs if self._is_bad(j)]
+        for j in targets:
+            j.rechecks = 0
+        self._recheck(jobs=targets, limit=rounds if rounds else (self.cfg.recheck_rounds or 3), retrain=False)
+        return sum(1 for j in targets if not self._is_bad(j))
+
+    def write_output(self, write_failed=None, strict=None):
+        """解析結果から oto.ini を (再) 書き込みする。解析はやり直さない。dry_run でも書き込む"""
+        if write_failed is not None or strict is not None:
+            self.cfg = replace(self.cfg, write_failed=self.cfg.write_failed if write_failed is None else write_failed,
+                               strict=self.cfg.strict if strict is None else strict)
+        self._emit(self.root, write=True)
+        self._report(self.root, self.report.get("seconds", 0.0) if self.report else 0.0, write=True)
+        return self.report
 
     def cancel(self):
         self.cancelled = True
@@ -174,6 +208,7 @@ class Pipeline:
         cfg = self.cfg
         t0 = time.time()
         root = Path(root)
+        self.root = root
         if not root.is_dir():
             raise FileNotFoundError(f"フォルダが見つかりません: {root}")
         it = root.rglob("*") if cfg.recursive else root.glob("*")
@@ -274,6 +309,7 @@ class Pipeline:
     def _train(self, ok, iters, p0, p1, stage="学習"):
         cfg = self.cfg
         prev = {}
+        patience, stable, prev_sc = self.P["patience"], 0, None
         for it in range(iters):
             self._check()
             items, scores, shift = [], [], []
@@ -308,12 +344,18 @@ class Pipeline:
             self.track.add("ll", float(np.mean(scores)), stage)
             if conv is not None:
                 self.track.add("shift", conv, stage)
-            self._checkpoint(f"{stage} {it + 1}/{iters}")
+            sc = self._checkpoint(f"{stage} {it + 1}/{iters}")
             self.log(f"    {stage} {it + 1}/{iters}: {len(items)} ファイル使用" + (f", 境界変化 {conv:.2f} フレーム" if conv is not None else ""))
             self.progress(p0 + (p1 - p0) * (it + 1) / iters, "学習")
-            if conv is not None and conv < 0.1:
-                self.log("    収束したため学習を終了")
-                break
+            if patience > 0 and conv is not None:
+                # 「境界がほぼ動かない」かつ「得点が伸びない」が patience 回連続し、かつ予定回数の半分は回したときだけ終了
+                flat = sc is None or prev_sc is None or (sc - prev_sc) <= cfg.converge_score
+                stable = stable + 1 if (conv < cfg.converge_shift and flat) else 0
+                if stable >= patience and it + 1 >= max(2, (iters + 1) // 2):
+                    self.log(f"    収束 (境界変化 {conv:.3f} フレーム, 得点の伸び停止が {stable} 回連続) のため学習を終了")
+                    break
+            if sc is not None:
+                prev_sc = sc
 
     def _eval_score(self):
         """学習の進行を測る得点: 固定のファイル集合に対する検証スコアの平均 (高いほど良い)"""
@@ -333,11 +375,12 @@ class Pipeline:
 
     def _checkpoint(self, stage):
         if not self.cfg.track_metrics:
-            return
+            return None
         sc = self._eval_score()
         self.track.add("score", sc, stage, log=True)
         if sc > self._best_score:
             self._best_score, self._best_model = sc, copy.deepcopy(self.model)
+        return sc
 
     def _train_net(self, ok):
         """アライメント結果を教師にニューラル音響モデルを学習し、ガウスモデルと併用する"""
@@ -479,32 +522,115 @@ class Pipeline:
         if best is None:
             j.fail("アライメントに失敗しました")
             return
+        self._apply(j, best)
+
+    def _apply(self, j, best):
+        """評価結果を FileJob に反映し、エントリを生成する (失敗でも write_failed なら生成する)"""
+        cfg = self.cfg
         j.morae, j.segs, j.timings, j.nuclei, j.score = best.morae, best.segs, best.timings, best.nuclei, best.score
-        j.notes += best.notes
-        if best.status == "FAIL":
-            j.status = "FAIL"
-            return
+        j.notes = [n for n in j.notes if not n.startswith(("分割失敗", "母音核数が"))]
+        for n in best.notes:
+            if n not in j.notes:
+                j.notes.append(n)
         j.status = best.status
-        j.entries = make_entries(j.path.name, j.timings, j.dur_ms, cfg)
+        j.entries = []
+        j.entries = make_entries(j.path.name, j.timings, j.dur_ms, cfg)     # 失敗ファイルも生成 (出力するかは _emit が決める)
         for e in j.entries:
             e.alias = cfg.alias_prefix + e.alias + cfg.alias_suffix
+            if best.status == "FAIL":
+                if STATUS_RANK[e.status] < 2:
+                    e.status = "REVIEW"
+                e.notes.append("ファイル全体が検証に不合格")
 
     # ------------------------------------------------------------------
     @staticmethod
     def _is_bad(j):
         return j.status == "FAIL" or any(STATUS_RANK[t.status] >= 2 for t in j.timings)
 
-    def _recheck(self):
-        """一通り終わった後で失敗箇所を再検査する。最大 recheck_rounds 回で打ち切る"""
-        limit = self.cfg.recheck_rounds
+    @staticmethod
+    def _bad_runs(timings):
+        runs = []
+        for t in timings:
+            if STATUS_RANK[t.status] >= 2:
+                if runs and t.index == runs[-1][1] + 1:
+                    runs[-1][1] = t.index
+                else:
+                    runs.append([t.index, t.index])
+        return runs
+
+    def _repair_run(self, j, a, b, level):
+        """悪いモーラの連続区間 [a, b] だけを、前後の良いモーラを固定したまま再整列する。
+        成功すれば新しい Result を返す (区間外の整列結果は変更しない)。"""
+        cfg, n, segs = self.cfg, len(j.morae), j.segs
+        LLb = self.model.loglik(j.F, j.X)
+        good = [g for g in segs if g.e > g.s and g.mora >= 0 and not (a <= g.mora <= b)]
+        try:
+            mdl = self.model.adapt(j.X, [(g.unit, g.s, g.e) for g in good]) if good else self.model
+            LLa = mdl.loglik(j.F, j.X)
+        except (ValueError, KeyError):
+            mdl, LLa = self.model, LLb
+        rate = self._rate(good) if good else 1.0
+        cur_bad = sum(1 for t in j.timings if STATUS_RANK[t.status] >= 2)
+        variants = [None] + RESCUE_VARIANTS + (RESCUE_EXTRA if level >= 2 else [])
+        for expand in (0, 1, 2):
+            aa, bb = max(0, a - expand), min(n - 1, b + expand)
+            ip = max([i for i, g in enumerate(segs) if g.mora == aa - 1], default=-1) if aa > 0 else -1
+            nx = [i for i, g in enumerate(segs) if g.mora == bb + 1] if bb < n - 1 else []
+            ine = min(nx) if nx else len(segs)
+            f0 = segs[ip].e if ip >= 0 else 0
+            f1 = segs[ine].s if ine < len(segs) else j.F.T
+            found = []
+            for v in variants:
+                c = replace(cfg, **v) if v else cfg
+                try:
+                    new = align_region(mdl, LLa, j.F.bnd, j.morae[aa:bb + 1], f0, f1, c, rate)
+                    for g in new:
+                        if g.mora >= 0:
+                            g.mora += aa
+                    full = [copy.copy(g) for g in segs[:ip + 1]] + new + [copy.copy(g) for g in segs[ine:]]
+                    res = evaluate_segs(self.model, j.F, j.morae, full, j.dur_ms, c, LLb)
+                except (AlignmentError, ValueError, KeyError):
+                    continue
+                bad = sum(1 for t in res.timings if STATUS_RANK[t.status] >= 2)
+                if bad < cur_bad or (bad == cur_bad and res.score > j.score + 0.05):
+                    found.append((bad, -res.score, res))
+            if found:
+                found.sort(key=lambda x: (x[0], x[1]))
+                return found[0][2]
+        return None
+
+    def _repair_partial(self, j, level):
+        """失敗したモーラ区間だけをやり直す。改善した区間があれば True"""
+        changed = False
+        tried = set()
+        while True:
+            runs = [r for r in self._bad_runs(j.timings) if tuple(r) not in tried]
+            if not runs:
+                break
+            a, b = runs[0]
+            tried.add((a, b))
+            res = self._repair_run(j, a, b, level)
+            if res is not None:
+                before = sum(1 for t in j.timings if STATUS_RANK[t.status] >= 2)
+                self._apply(j, res)
+                after = sum(1 for t in j.timings if STATUS_RANK[t.status] >= 2)
+                j.notes.append(f"部分やり直し: モーラ {a + 1}〜{b + 1} 番だけ再整列 (不合格 {before} → {after})")
+                changed = True
+        return changed
+
+    def _recheck(self, jobs=None, limit=None, retrain=True):
+        """一通り終わった後で失敗箇所を再検査する。まず失敗したモーラ区間だけをやり直し、
+        整列自体が得られていないファイルは全体をやり直す。最大 recheck_rounds 回で打ち切る"""
+        limit = self.cfg.recheck_rounds if limit is None else limit
         if limit <= 0:
             return
+        pool = self.jobs if jobs is None else jobs
         for rnd in range(1, limit + 1):
-            todo = [j for j in self.jobs if j.F is not None and j.morae and j.X is not None and self._is_bad(j)]
+            todo = [j for j in pool if j.F is not None and j.morae and j.X is not None and self._is_bad(j)]
             if not todo:
                 break
             self.log(f"    再検査 {rnd}/{limit} 回目: 失敗箇所のあるファイル {len(todo)} 件")
-            if rnd == 1 and not self.cfg.model_path:
+            if rnd == 1 and retrain and not self.cfg.model_path:
                 good = [j for j in self.jobs if j.status == "OK" and j.segs and not self._is_bad(j)]
                 if len(good) >= 4:      # 成功したファイルだけでモデルを引き締めてから再解析
                     items = [(j.X, [(g.unit, g.s, g.e) for g in j.segs if g.e > g.s]) for j in good]
@@ -513,40 +639,72 @@ class Pipeline:
                 self._check()
                 j.rechecks = rnd
                 j.notes.append(f"再検査 {rnd} 回目")
-                self._final(j, level=rnd)
+                if self.cfg.partial_repair and j.segs and j.timings:
+                    self._repair_partial(j, rnd)
+                if self._is_bad(j) and (not j.segs or not self.cfg.partial_repair or rnd >= 2):
+                    self._final(j, level=rnd)       # 区間のやり直しで直らない/整列が無い → ファイル全体を再解析
             fixed = sum(1 for j in todo if not self._is_bad(j))
             self.log(f"    再検査 {rnd} 回目の結果: 解決 {fixed} / 残り {len(todo) - fixed}")
-        left = [j for j in self.jobs if j.F is not None and j.morae and self._is_bad(j) and j.rechecks >= limit]
+        left = [j for j in pool if j.F is not None and j.morae and self._is_bad(j) and j.rechecks >= limit]
         for j in left:
-            j.notes.append(f"{limit} 回再検査しても不合格のため終了 (該当箇所は oto.ini に出力しません)")
+            j.notes.append(f"{limit} 回再検査しても不合格のため終了" +
+                           (" (強制出力モード: 該当箇所も oto.ini に書き込みます)" if self.cfg.write_failed
+                            else " (該当箇所は oto.ini に出力しません)"))
         if left:
             self.log(f"    {limit} 回再検査しても不合格: {len(left)} 件 → 終了")
 
-    def _emit(self, root):
+    def _emit(self, root, write=None):
         cfg = self.cfg
+        dry = cfg.dry_run if write is None else not write
+        self.review, self.kept, self.forced, self.dropped = {}, {}, {}, []
         bydir = {}
         for j in self.jobs:
             bydir.setdefault(j.path.parent, []).append(j)
         limit = 0 if cfg.strict else 1
         for d, js in bydir.items():
-            keep, review = [], []
+            keep, review, forced = [], [], []
             for j in js:
-                if j.status == "FAIL":
-                    continue
                 for e in j.entries:
-                    (keep if STATUS_RANK[e.status] <= limit else review).append(e)
+                    e.forced = False
+                    over = j.status == "FAIL" or STATUS_RANK[e.status] > limit
+                    if e.manual is False:
+                        review.append(e)
+                    elif e.manual is True and e.valid:
+                        e.forced = over
+                        keep.append(e)
+                    elif j.status == "FAIL" and not cfg.write_failed:
+                        continue
+                    elif not over:
+                        keep.append(e)
+                    elif cfg.write_failed and e.valid:
+                        e.forced = True
+                        keep.append(e)
+                    else:
+                        review.append(e)
             if cfg.dedupe:
                 best = {}
                 for e in keep:
                     cur = best.get(e.alias)
-                    if cur is None or (STATUS_RANK[e.status], -e.quality) < (STATUS_RANK[cur.status], -cur.quality):
+                    key = lambda x: (0 if x.manual is True else 1, STATUS_RANK[x.status], -x.quality)   # 手動で「書く」にしたものを最優先
+                    if cur is None or key(e) < key(cur):
                         best[e.alias] = e
                 self.dropped += [e for e in keep if best[e.alias] is not e]
                 keep = [e for e in keep if best[e.alias] is e]
+            forced = [e for e in keep if e.forced]
             self.review[d] = review
             self.kept[d] = keep
-            if cfg.dry_run:
+            self.forced[d] = forced
+            if dry:
                 continue
+            if not forced:
+                (d / "otoium_forced.txt").unlink(missing_ok=True)       # 前回の古い一覧を残さない
+            if not review:
+                (d / "oto_review.txt").unlink(missing_ok=True)
+            if forced:
+                (d / "otoium_forced.txt").write_text(
+                    "# 検証に不合格だが write_failed により oto.ini へ書き込んだエントリ (要確認)\n" +
+                    "\n".join(f"{format_entry(e)}   # {e.status}: {'; '.join(e.notes)}" for e in forced) + "\n",
+                    encoding="utf-8")
             if not keep:
                 self.log(f"    {d}: 出力できるエントリが 0 件のため、既存の oto.ini は変更しません")
                 if review:
@@ -559,14 +717,16 @@ class Pipeline:
             if cfg.merge:
                 names = {j.path.name for j in js}
                 extra = [l for l in read_lines(d / "oto.ini", cfg.encoding) if l.split("=", 1)[0] not in names]
-            write_oto(d / "oto.ini", keep, cfg.encoding, cfg.backup, extra)
+            first = d not in self._backed_up           # バックアップは最初の書き込み時だけ (GUI での再書き込みで増やさない)
+            self._backed_up.add(d)
+            write_oto(d / "oto.ini", keep, cfg.encoding, cfg.backup and first, extra)
             if review:
                 (d / "oto_review.txt").write_text(
                     "# 確信度不足・検証失敗のため oto.ini に入れなかった候補\n" +
                     "\n".join(f"{format_entry(e)}   # {e.status}: {'; '.join(e.notes)}" for e in review) + "\n",
                     encoding="utf-8")
-            self.log(f"    {d}: {len(keep)} 件を出力 (保留 {len(review)})")
-        if not cfg.dry_run:
+            self.log(f"    {d}: {len(keep)} 件を出力 (うち強制出力 {len(forced)} / 保留 {len(review)})")
+        if not dry:
             for j in self.jobs:
                 if j.segs and j.status != "FAIL":
                     if cfg.export_labels:
@@ -574,7 +734,8 @@ class Pipeline:
                     if cfg.textgrid:
                         write_textgrid(j.path.with_suffix(".TextGrid"), j)
 
-    def _report(self, root, sec):
+    def _report(self, root, sec, write=None):
+        dry = self.cfg.dry_run if write is None else not write
         files = []
         for j in self.jobs:
             files.append({
@@ -595,9 +756,9 @@ class Pipeline:
         n_ent = sum(len(v) for v in self.kept.values())
         n_rev = sum(len(v) for v in self.review.values())
         self.report = {"seconds": round(sec, 1), "files": files, "total": len(self.jobs), "failed": n_fail,
-                       "warned": n_warn, "entries_written": n_ent, "entries_review": n_rev,
+                       "warned": n_warn, "entries_written": n_ent, "entries_review": n_rev, "entries_forced": sum(len(v) for v in self.forced.values()),
                        "config": self.cfg.to_dict(), "nn_weight": self.model.nn_weight}
-        if not self.cfg.dry_run:
+        if not dry:
             (root / "otoium_report.json").write_text(json.dumps(self.report, ensure_ascii=False, indent=1), encoding="utf-8")
             lines = [f"otoium レポート (処理 {sec:.1f}s)", f"ファイル {len(self.jobs)} / 失敗 {n_fail} / 警告 {n_warn}",
                      f"oto.ini 出力 {n_ent} 件 / 保留 {n_rev} 件", ""]

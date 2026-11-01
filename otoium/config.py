@@ -66,6 +66,11 @@ class Config:
     alias_suffix: str = ""
     jobs: int = 1
     cache: bool = True
+    patience: int = -1              # 収束判定: 連続で「境界が動かず得点も伸びない」回数 (0: 早期終了なし, -1: プリセット)
+    converge_shift: float = 0.03    # 境界の平均変化がこの値(フレーム)未満なら「動かない」
+    converge_score: float = 0.002   # 得点の伸びがこの値以下なら「伸びない」
+    partial_repair: bool = True     # 失敗したモーラの区間だけを再整列
+    write_failed: bool = False      # 失敗・保留でも oto.ini に書き込む (一覧は otoium_forced.txt)
     recheck_rounds: int = 3         # 失敗箇所の再検査の最大回数 (0 で無効)
     track_metrics: bool = True      # 学習の得点を記録・表示
 
@@ -74,10 +79,10 @@ class Config:
 
 
 PRESETS = {
-    "fast":  dict(iters=3,  rounds=0, rescue=False, net_epochs=0,  ens=0, adapt_rounds=0, post=0, conf=0),
-    "high":  dict(iters=5,  rounds=1, rescue=True,  net_epochs=10, ens=1, adapt_rounds=1, post=2, conf=0),
-    "max":   dict(iters=8,  rounds=2, rescue=True,  net_epochs=14, ens=2, adapt_rounds=2, post=3, conf=1),
-    "ultra": dict(iters=12, rounds=3, rescue=True,  net_epochs=20, ens=3, adapt_rounds=3, post=4, conf=2),
+    "fast":  dict(iters=3,  rounds=0, rescue=False, net_epochs=0,  ens=0, adapt_rounds=0, post=0, conf=0, patience=1),
+    "high":  dict(iters=5,  rounds=1, rescue=True,  net_epochs=10, ens=1, adapt_rounds=1, post=2, conf=0, patience=2),
+    "max":   dict(iters=8,  rounds=2, rescue=True,  net_epochs=14, ens=2, adapt_rounds=2, post=3, conf=1, patience=3),
+    "ultra": dict(iters=12, rounds=3, rescue=True,  net_epochs=20, ens=3, adapt_rounds=3, post=4, conf=2, patience=0),
 }
 ACCURACY_MODES = ["fast", "high", "max", "ultra", "custom"]
 
@@ -99,6 +104,8 @@ def resolve(cfg):
         pr["post"] = cfg.post_iters
     if cfg.confident_rounds >= 0:
         pr["conf"] = cfg.confident_rounds
+    if cfg.patience >= 0:
+        pr["patience"] = cfg.patience
     pr["tune"] = pr["rounds"] > 0 if cfg.auto_tune is None else bool(cfg.auto_tune) and max(pr["rounds"], 1) > 0
     if cfg.auto_tune and pr["rounds"] == 0:
         pr["rounds"] = 1

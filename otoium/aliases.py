@@ -19,6 +19,9 @@ class AliasEntry:
     moras: list = field(default_factory=list)
     quality: float = 1.0
     cut_len: float = 0.0
+    valid: bool = True       # パラメータが物理的に成立しているか (False は強制出力でも書かない)
+    forced: bool = False     # 失敗・保留を承知で出力するエントリ
+    manual: object = None    # GUI での手動指定: True=必ず書く / False=書かない / None=自動判定
 
 
 def _status(moras_t, extra=None):
@@ -39,9 +42,15 @@ def _finalize(e, wav_ms):
         cut_len = wav_ms - e.offset
         if cut_len < e.consonant + 1.0:
             e.status = "ERROR"
+            e.valid = False
             e.notes.append("使用区間が録音長を超えるため生成不可")
     e.cut_len = cut_len
     e.cutoff = -cut_len
+    vals = (e.offset, e.consonant, e.cutoff, e.pre, e.overlap)
+    if not all(v == v and abs(v) != float("inf") for v in vals):
+        e.valid = False
+        e.status = "ERROR"
+        e.notes.append("パラメータが数値として不正")
     return e
 
 

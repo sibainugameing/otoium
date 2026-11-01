@@ -115,3 +115,17 @@ def align(model, F, morae, cfg, LL=None, rate=1.0):
     toks = build_tokens(morae, F.T, cfg.hop_ms, cfg, model, rate)
     segs, score = viterbi(LL, model.idx, toks, F.bnd, cfg.boundary_weight)
     return segs, score, LL
+
+
+def align_region(model, LL, bnd, morae_sub, f0, f1, cfg, rate=1.0):
+    """フレーム区間 [f0, f1) の中だけで morae_sub を再整列し、全体フレーム座標の Seg 列を返す。
+    mora 番号は 0 起点 (呼び出し側で offset を足す)。"""
+    T = f1 - f0
+    if T <= 0:
+        raise AlignmentError("再整列する区間が空です")
+    toks = build_tokens(morae_sub, T, cfg.hop_ms, cfg, model, rate)
+    segs, _ = viterbi(LL[:, f0:f1], model.idx, toks, bnd[f0:f1], cfg.boundary_weight)
+    for g in segs:
+        g.s += f0
+        g.e += f0
+    return segs

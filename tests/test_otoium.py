@@ -240,6 +240,110 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
             p, rep = run(d, mode="vcv", accuracy="high")
             self.assertEqual(rep["failed"], 0)
 
+    def test_patience_zero_runs_all_iterations(self):
+        lines = []
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            p = Pipeline(Config(mode="vcv", accuracy="custom", train_iters=6, patience=0, use_net=False,
+                                tune_rounds=0, adapt_rounds=0, post_iters=0, confident_rounds=0), log=lines.append)
+            p.run(d)
+        self.assertEqual(sum(1 for l in lines if l.strip().startswith("学習 ") and "/6:" in l), 6)
+        self.assertFalse(any("収束" in l for l in lines))
+
+    def test_convergence_needs_flat_score_and_stable_boundaries(self):
+        lines = []
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            p = Pipeline(Config(mode="vcv", accuracy="custom", train_iters=12, patience=2, use_net=False,
+                                tune_rounds=0, adapt_rounds=0, post_iters=0, confident_rounds=0), log=lines.append)
+            p.run(d)
+        done = [l for l in lines if l.strip().startswith("学習 ") and "/12:" in l]
+        self.assertGreaterEqual(len(done), 6)            # 予定12回の半分までは必ず回す
+
+    def test_partial_repair_only_touches_failed_region(self):
+        import copy
+        from otoium.evaluate import evaluate_segs
+        with tempfile.TemporaryDirectory() as d:
+            truth = make_bank(d)
+            p, rep = run(d, mode="vcv", accuracy="fast", recheck_rounds=0)
+            j = [j for j in p.jobs if j.path.name == "_あかさたな.wav"][0]
+            segs = [copy.copy(g) for g in j.segs]
+            m3 = [g for g in segs if g.mora == 3]
+            m2v = [g for g in segs if g.mora == 2][-1]
+            B, E = m3[0].s, m3[-1].e
+            Bn = E - 12
+            m2v.e = Bn
+            for g, (a, b) in zip(m3, [(Bn, Bn + 3), (Bn + 3, Bn + 6), (Bn + 6, E)]):
+                g.s, g.e = a, b
+            LLb = p.model.loglik(j.F, j.X)
+            bad = evaluate_segs(p.model, j.F, j.morae, segs, j.dur_ms, p.cfg, LLb)
+            p._apply(j, bad)
+            runs = p._bad_runs(j.timings)
+            self.assertTrue(runs, "壊した区間が不合格にならない")
+            orig0 = [(g.unit, g.s, g.e) for g in j.segs if g.mora == 0]
+            n_bad = sum(1 for t in j.timings if t.status in ("REVIEW", "ERROR"))
+            ok = p._repair_partial(j, 1)
+            self.assertTrue(ok)
+            self.assertLess(sum(1 for t in j.timings if t.status in ("REVIEW", "ERROR")), n_bad)
+            self.assertEqual(orig0, [(g.unit, g.s, g.e) for g in j.segs if g.mora == 0])   # 区間外は不変
+            tv = [a for (mi, u, a, b) in truth["_あかさたな.wav"] if mi == 3 and u == "a"][0]
+            self.assertAlmostEqual(j.timings[3].vowel_start / 1000, tv, delta=0.03)
+            self.assertTrue(any("部分やり直し" in n for n in j.notes))
+
+    def test_write_failed_forces_entries_into_oto(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            noise = (0.2 * np.random.default_rng(0).standard_normal(44100 * 3)).astype("float32")
+            write_wav(Path(d) / "_なにぬねの.wav", noise)
+            p, rep = run(d, mode="vcv", accuracy="fast", write_failed=True)
+            j = [j for j in p.jobs if j.path.name == "_なにぬねの.wav"][0]
+            self.assertEqual(j.status, "FAIL")
+            oto = read_oto(d)
+            self.assertIn("_なにぬねの.wav", oto)
+            self.assertTrue((Path(d) / "otoium_forced.txt").exists())
+            self.assertGreater(rep["entries_forced"], 0)
+            self.assertIn("_あかさたな.wav", oto)
+
+    def test_post_run_write_recheck_and_manual_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            noise = (0.2 * np.random.default_rng(0).standard_normal(44100 * 3)).astype("float32")
+            write_wav(Path(d) / "_なにぬねの.wav", noise)
+            (Path(d) / "oto.ini").write_bytes("old.wav=あ,1,2,-3,4,5\n".encode("cp932"))
+            p, rep = run(d, mode="vcv", accuracy="fast", dry_run=True, recheck_rounds=1)
+            self.assertEqual((Path(d) / "oto.ini").read_bytes(), "old.wav=あ,1,2,-3,4,5\n".encode("cp932"))  # dry-run は書かない
+            bad = [j for j in p.jobs if j.path.name == "_なにぬねの.wav"][0]
+            # 実行後の再検査 (回数を指定。解決はしない)
+            self.assertEqual(p.recheck([bad], 2), 0)
+            self.assertEqual(bad.rechecks, 2)
+            # 書き込み: 失敗ファイルは出ない
+            p.write_output(write_failed=False)
+            oto = read_oto(d)
+            self.assertNotIn("_なにぬねの.wav", oto)
+            self.assertIn("_あかさたな.wav", oto)
+            self.assertEqual(len(list(Path(d).glob("oto.ini.bak*"))), 1)
+            # 失敗も書き込む
+            p.write_output(write_failed=True)
+            self.assertIn("_なにぬねの.wav", read_oto(d))
+            self.assertTrue((Path(d) / "otoium_forced.txt").exists())
+            # 元に戻すと、強制出力の一覧も消える
+            p.write_output(write_failed=False)
+            self.assertNotIn("_なにぬねの.wav", read_oto(d))
+            self.assertFalse((Path(d) / "otoium_forced.txt").exists())
+            self.assertEqual(len(list(Path(d).glob("oto.ini.bak*"))), 1)   # バックアップは増えない
+            # 個別指定: 失敗ファイルの1件だけ書く / 合格エイリアス1件を書かない
+            e_bad = bad.entries[0]
+            self.assertEqual(p.decision(bad, e_bad), "✗")
+            e_bad.manual = True
+            self.assertEqual(p.decision(bad, e_bad), "強制")
+            good = [j for j in p.jobs if j.path.name == "_あかさたな.wav"][0]
+            e_good = good.entries[1]
+            e_good.manual = False
+            p.write_output()
+            oto = read_oto(d)
+            self.assertEqual([a[0] for a in oto["_なにぬねの.wav"]], [e_bad.alias])
+            self.assertNotIn(e_good.alias, [a[0] for a in oto["_あかさたな.wav"]])
+
     def test_resolve_presets(self):
         from otoium.config import resolve
         self.assertFalse(resolve(Config(accuracy="fast"))["net"])

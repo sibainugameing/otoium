@@ -27,7 +27,8 @@ def calibrate(model, jobs, cfg, log, max_files=80):
             agree.append(t.agree_v)
             if t.mora.has_cons:
                 cagree.append(t.cons_agree)
-    if len(conf) < 5:
+    if len(conf) < 20:
+        log(f"    しきい値の自動校正: サンプルが少ない ({len(conf)} モーラ) ためスキップ")
         return cfg
     f = float(np.clip(np.median(conf) / 2.5, 0.3, 1.0))
     ok = _robust_low(agree, 0.25, 0.55)

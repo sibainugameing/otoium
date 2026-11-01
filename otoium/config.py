@@ -66,6 +66,7 @@ class Config:
     alias_suffix: str = ""
     jobs: int = 1
     cache: bool = True
+    recheck_rounds: int = 3         # 失敗箇所の再検査の最大回数 (0 で無効)
     track_metrics: bool = True      # 学習の得点を記録・表示
 
     def to_dict(self):

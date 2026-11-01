@@ -1,4 +1,5 @@
 """oto.ini の書き出し"""
+import os
 import shutil
 from pathlib import Path
 
@@ -39,4 +40,6 @@ def write_oto(path, entries, encoding="cp932", backup=True, extra_lines=()):
         data = text.encode(encoding)
     except UnicodeEncodeError as ex:
         raise ValueError(f"文字コード {encoding} で表現できない文字があります: {ex}")
-    path.write_bytes(data)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)        # 書き込み途中の失敗で不完全な oto.ini を残さない

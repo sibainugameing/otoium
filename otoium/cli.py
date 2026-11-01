@@ -31,6 +31,7 @@ def build_parser():
     p.add_argument("--no-auto-thresholds", action="store_true", help="しきい値の自動校正を無効化")
     p.add_argument("--no-refine", action="store_true", help="1ms 境界微調整を無効化")
     p.add_argument("--jobs", type=int, default=1, help="特徴抽出の並列数")
+    p.add_argument("--recheck-rounds", type=int, default=3, help="失敗箇所の再検査の最大回数 (0 で無効)")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--merge", action="store_true", help="既存 oto.ini の未処理ファイル行を残す")
     p.add_argument("--prefix", default="", help="エイリアス接頭辞")
@@ -62,7 +63,7 @@ def main(argv=None):
                  confident_rounds=a.confident_rounds, accuracy=a.accuracy, auto_tune=False if a.no_tune else None,
                  rescue=False if a.no_rescue else None, refine=not a.no_refine, use_net=False if a.no_net else None,
                  adapt=False if a.no_adapt else None, auto_thresholds=not a.no_auto_thresholds, jobs=a.jobs, cache=not a.no_cache,
-                 merge=a.merge, alias_prefix=a.prefix, alias_suffix=a.suffix, textgrid=a.textgrid, model_path=a.model, strict=a.strict,
+                 merge=a.merge, recheck_rounds=a.recheck_rounds, alias_prefix=a.prefix, alias_suffix=a.suffix, textgrid=a.textgrid, model_path=a.model, strict=a.strict,
                  dry_run=a.dry_run, backup=not a.no_backup, recursive=not a.no_recursive, dedupe=not a.no_dedupe,
                  export_labels=a.labels)
 

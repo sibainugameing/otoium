@@ -249,6 +249,7 @@ class App(tk.Tk):
         for k, val in dict(c_iters=5, c_rounds=1, c_epochs=10, c_ens=1, c_adapt=1, c_post=2, c_conf=0).items():
             self.V[k] = tk.IntVar(value=val)
         self.V["mode_info"] = tk.StringVar(value="")
+        self.V["recheck"] = tk.IntVar(value=3)
         self.V["filter"] = tk.StringVar(value="全て")
         self.V["stage"] = tk.StringVar(value="待機中")
 
@@ -269,7 +270,7 @@ class App(tk.Tk):
             strict=v["strict"], dry_run=v["dry_run"], merge=v["merge"], textgrid=v["textgrid"],
             export_labels=v["export_labels"], alias_prefix=v["alias_prefix"], alias_suffix=v["alias_suffix"],
             jobs=max(1, int(v["jobs"] or 1)), recursive=v["recursive"], backup=v["backup"], dedupe=v["dedupe"],
-            cache=v["cache"])
+            cache=v["cache"], recheck_rounds=int(v["recheck"]))
 
     # ---------------- 画面 ----------------
     def _build_top(self):
@@ -333,6 +334,8 @@ class App(tk.Tk):
                   foreground="#666666", wraplength=360).grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Label(g2, textvariable=self.V["mode_info"], foreground="#2b6cb0", wraplength=360, justify="left").grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Label(g2, text="失敗箇所の再検査 (最大回数)").grid(row=10, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Spinbox(g2, from_=0, to=10, textvariable=self.V["recheck"], width=5).grid(row=10, column=2, sticky="w", pady=(6, 0))
         g5 = ttk.LabelFrame(tab, text="カスタム (精度で custom を選んだときに有効)", padding=8)
         g5.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
         self.custom_widgets = []

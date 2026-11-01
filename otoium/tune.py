@@ -30,13 +30,22 @@ def _objective(model, subset, cfg):
 
 
 def autotune(model, jobs, cfg, log, rounds=1, max_files=16, on_score=None):
+    """調整用ファイルで探索し、別のホールドアウトファイルで悪化していれば調整結果を採用しない (過適合の防止)"""
     if not jobs:
         return cfg
     step = max(1, len(jobs) // max_files)
     sel = jobs[::step][:max_files]
-    subset = [(j, model.loglik(j.F, j.X)) for j in sel]
+    if len(sel) >= 6:
+        tune_set, hold_set = sel[0::2], sel[1::2]
+    else:
+        tune_set, hold_set = sel, []
+    orig_cfg, orig_nn = cfg, model.nn_weight
+    hold_base = None
+    if hold_set:
+        hold_base = _objective(model, [(j, model.loglik(j.F, j.X)) for j in hold_set], cfg)
+    subset = [(j, model.loglik(j.F, j.X)) for j in tune_set]
     best, best_s = cfg, _objective(model, subset, cfg)
-    log(f"    自動調整: 初期スコア {best_s:.3f} ({len(sel)} ファイルで評価)")
+    log(f"    自動調整: 初期スコア {best_s:.3f} (調整用 {len(tune_set)} / 評価用 {len(hold_set)} ファイル)")
     if on_score:
         on_score(best_s)
     grid, nn_grid = (FINE_GRID, FINE_NN) if rounds >= 3 else (GRID, NN_GRID)
@@ -48,7 +57,7 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16, on_score=None):
                     continue
                 old = model.nn_weight
                 model.nn_weight = v
-                sub2 = [(j, model.loglik(j.F, j.X)) for j in sel]
+                sub2 = [(j, model.loglik(j.F, j.X)) for j in tune_set]
                 s = _objective(model, sub2, best)
                 if s > best_s + 1e-4:
                     best_s, subset, changed = s, sub2, True
@@ -58,8 +67,6 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16, on_score=None):
                 else:
                     model.nn_weight = old
         for key, vals in grid.items():
-            if vals is None:
-                continue
             for v in vals:
                 if v == getattr(best, key):
                     continue
@@ -72,4 +79,11 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16, on_score=None):
                         on_score(s)
         if not changed:
             break
+    if hold_set:
+        hold_best = _objective(model, [(j, model.loglik(j.F, j.X)) for j in hold_set], best)
+        log(f"    評価用ファイルでの確認: 調整前 {hold_base:.3f} → 調整後 {hold_best:.3f}")
+        if hold_best < hold_base - 0.01:
+            model.nn_weight = orig_nn
+            log("    評価用で悪化したため、調整結果を採用せず元の設定を維持")
+            return orig_cfg
     return best

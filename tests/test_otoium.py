@@ -69,9 +69,7 @@ class T(unittest.TestCase):
             make_bank(d)
             run(d, mode="cvvc")
             r = [a[0] for a in read_oto(d)["_あかさたな.wav"]]
-            self.assertEqual(r, ["あ", "あ k", "か", "あ s", "さ", "あ t", "た", "あ n", "な"][:0] or r)
-            self.assertIn("a k", r); self.assertIn("a s", r); self.assertIn("a t", r); self.assertIn("a n", r)
-            self.assertEqual([x for x in r if " " not in x], ["あ", "か", "さ", "た", "な"])
+            self.assertEqual(r, ["あ", "か", "a k", "さ", "a s", "た", "a t", "な", "a n"])
 
     def test_single_isolated_cv(self):
         with tempfile.TemporaryDirectory() as d:
@@ -192,6 +190,55 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
             self.assertTrue(any(e[0] == "nn_acc" for e in events))
             self.assertTrue((Path(d) / "otoium_training.csv").exists())
             self.assertTrue((Path(d) / "otoium_training.json").exists())
+
+    def test_empty_result_keeps_existing_oto_and_atomic_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            noise = (0.2 * np.random.default_rng(0).standard_normal(44100 * 3)).astype("float32")
+            write_wav(Path(d) / "_あかさ.wav", noise)
+            old = "keep.wav=あ,1,2,-3,4,5\n".encode("cp932")
+            (Path(d) / "oto.ini").write_bytes(old)
+            run(d, mode="vcv", backup=False)
+            self.assertEqual((Path(d) / "oto.ini").read_bytes(), old)
+            self.assertEqual(list(Path(d).glob("*.tmp")), [])
+
+    def test_cache_is_npz_not_pickle_and_survives_corruption(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            run(d, mode="vcv", accuracy="fast")
+            files = list((Path(d) / ".otoium_cache").glob("*"))
+            self.assertTrue(files and all(f.suffix == ".npz" for f in files))
+            files[0].write_bytes(b"corrupted")
+            p, rep = run(d, mode="vcv", accuracy="fast")
+            self.assertEqual(rep["failed"], 0)
+
+    def test_recheck_gives_up_after_three(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            noise = (0.2 * np.random.default_rng(0).standard_normal(44100 * 3)).astype("float32")
+            write_wav(Path(d) / "_なにぬねの.wav", noise)
+            lines = []
+            p = Pipeline(Config(mode="vcv", accuracy="fast"), log=lines.append)
+            rep = p.run(d)
+            j = [j for j in p.jobs if j.path.name == "_なにぬねの.wav"][0]
+            self.assertEqual(j.status, "FAIL")
+            self.assertEqual(j.rechecks, 3)
+            self.assertTrue(any("3 回再検査しても不合格" in n for n in j.notes))
+            self.assertEqual(sum(1 for l in lines if "再検査" in l and "回目:" in l), 3)
+            self.assertNotIn("_なにぬねの.wav", read_oto(d))
+
+    def test_recheck_disabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            noise = (0.2 * np.random.default_rng(0).standard_normal(44100 * 3)).astype("float32")
+            write_wav(Path(d) / "_なにぬねの.wav", noise)
+            p, rep = run(d, mode="vcv", accuracy="fast", recheck_rounds=0)
+            self.assertEqual([j for j in p.jobs if j.path.name == "_なにぬねの.wav"][0].rechecks, 0)
+
+    def test_tune_holdout_does_not_crash_small_sets(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d, BANK[:4])
+            p, rep = run(d, mode="vcv", accuracy="high")
+            self.assertEqual(rep["failed"], 0)
 
     def test_resolve_presets(self):
         from otoium.config import resolve

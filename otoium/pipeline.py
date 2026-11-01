@@ -2,7 +2,6 @@
 import copy
 import hashlib
 import json
-import pickle
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
@@ -10,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from .audio_io import read_wav
 from .config import resolve
-from .features import extract, SilentAudioError
+from .features import extract, SilentAudioError, Features
 from .model import AcousticModel
 from .aligner import align, AlignmentError
 from .kana import parse_text, TextParseError
@@ -23,6 +22,8 @@ from .aliases import make_entries
 from .oto import write_oto, format_entry, read_lines
 from .export import write_labels, write_textgrid
 
+RESCUE_EXTRA = [dict(boundary_weight=12.0, duration_weight=1.5), dict(pause_penalty=0.1, boundary_weight=2.0),
+                dict(duration_weight=0.1)]
 RESCUE_VARIANTS = [
     dict(pause_penalty=0.5), dict(pause_penalty=5.0, duration_weight=1.0), dict(boundary_weight=8.0),
     dict(boundary_weight=1.0, duration_weight=0.2),
@@ -49,6 +50,7 @@ class FileJob:
         self.entries = []
         self.nuclei = 0
         self.score = 0.0
+        self.rechecks = 0
 
     def fail(self, msg):
         self.status = "FAIL"
@@ -91,6 +93,26 @@ def _envelope(x, n=1000):
     return np.stack([a.min(1), a.max(1)])
 
 
+_FEAT_FIELDS = ["cls", "mfcc", "dmfcc", "energy_db", "f0", "bnd", "fine_e", "fine_h"]
+
+
+def _cache_save(path, dur_ms, F, env):
+    d = {k: getattr(F, k) for k in _FEAT_FIELDS}
+    d.update(hop_s=np.array(F.hop_s), dur_s=np.array(F.dur_s), ref_db=np.array(F.ref_db),
+             dur_ms=np.array(dur_ms), env=env)
+    tmp = path.with_name(path.name + ".tmp.npz")
+    np.savez(tmp, **d)
+    tmp.replace(path)
+
+
+def _cache_load(path):
+    """pickle を使わない npz キャッシュ (allow_pickle=False: 改ざんされても任意コードは実行されない)"""
+    z = np.load(path, allow_pickle=False)
+    F = Features(*[z[k] for k in _FEAT_FIELDS[:6]], float(z["hop_s"]), float(z["dur_s"]), float(z["ref_db"]),
+                 z["fine_e"], z["fine_h"])
+    return float(z["dur_ms"]), F, z["env"]
+
+
 def _load_one(args):
     """ワーカー: (path, hop, win, cache_dir) → ('ok', (dur_ms, F, env)) / ('err', msg)"""
     path, hop, win, cache_dir = args
@@ -100,14 +122,17 @@ def _load_one(args):
         if cache_dir:
             st = path.stat()
             h = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:12]
-            cp = Path(cache_dir) / f"{h}.{st.st_mtime_ns}.{st.st_size}.{hop}.{win}.v2.pkl"
+            cp = Path(cache_dir) / f"{h}.{st.st_mtime_ns}.{st.st_size}.{hop}.{win}.v3.npz"
             if cp.exists():
-                return "ok", pickle.loads(cp.read_bytes())
+                try:
+                    return "ok", _cache_load(cp)
+                except Exception:
+                    pass            # 壊れた/不正なキャッシュは捨てて再計算
         x, sr = read_wav(path)
         data = (len(x) / sr * 1000.0, extract(x, sr, hop, win), _envelope(x))
         if cp:
             cp.parent.mkdir(exist_ok=True)
-            cp.write_bytes(pickle.dumps(data))
+            _cache_save(cp, *data)
         return "ok", data
     except (SilentAudioError, ValueError, OSError, EOFError, KeyError) as ex:
         return "err", f"{type(ex).__name__}: {ex}"
@@ -202,7 +227,8 @@ class Pipeline:
             self.progress(0.62 + 0.28 * (i + 1) / len(fin), j.path.name)
         if fin:
             self.track.add("score", float(np.mean([j.score for j in fin if j.status != "FAIL"] or [0.0])), "最終解析", log=True)
-        self.log("[5/6] oto.ini を生成中…")
+        self.log("[5/6] 失敗箇所の再検査と oto.ini の生成…")
+        self._recheck()
         self._emit(root)
         if not self.cfg.dry_run and self.track.history:
             self.track.save(root)
@@ -399,8 +425,10 @@ class Pipeline:
         bad = sum(1 for t in r.timings if STATUS_RANK[t.status] >= 1)
         return bad / len(r.timings) > 0.15
 
-    def _final(self, j):
+    def _final(self, j, level=0):
         cfg = self.cfg
+        if level:
+            j.status, j.entries, j.timings, j.segs = "OK", [], [], []
         mdl = self.model
         try:
             LLb = mdl.loglik(j.F, j.X)
@@ -411,8 +439,8 @@ class Pipeline:
             LLb = LL = None
             j.notes.append(f"初回解析失敗: {ex}")
         rate = 1.0
-        if self.do_adapt and best is not None:
-            for _ in range(self.P["adapt_rounds"]):
+        if (self.do_adapt or level) and best is not None:
+            for _ in range(self.P["adapt_rounds"] + level):
                 try:
                     rt = self._rate(best.segs)
                     m2 = self.model.adapt(j.X, [(g.unit, g.s, g.e) for g in best.segs if g.e > g.s])
@@ -425,13 +453,13 @@ class Pipeline:
                     best, mdl, LL, rate = r2, m2, LL2, rt
                 else:
                     break
-        if self.do_rescue and (best is None or self._need_rescue(best)):
+        if (self.do_rescue or level) and (best is None or self._need_rescue(best)):
             base = best.score if best else -9.0
             cands = []
-            for v in RESCUE_VARIANTS:
+            for v in RESCUE_VARIANTS + (RESCUE_EXTRA if level >= 2 else []):
                 cands.append((replace(cfg, **v), j.morae, f"パラメータ {v}"))
             n = len(j.morae)
-            for k in range(1, min(3, n - 2) + 1):
+            for k in range(1, min(3 + level, n - 2) + 1):
                 cands.append((cfg, j.morae[:-k], f"録音が台本より末尾 {k} モーラ短いと判断"))
             for c, mo, why in cands:
                 try:
@@ -462,6 +490,38 @@ class Pipeline:
             e.alias = cfg.alias_prefix + e.alias + cfg.alias_suffix
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _is_bad(j):
+        return j.status == "FAIL" or any(STATUS_RANK[t.status] >= 2 for t in j.timings)
+
+    def _recheck(self):
+        """一通り終わった後で失敗箇所を再検査する。最大 recheck_rounds 回で打ち切る"""
+        limit = self.cfg.recheck_rounds
+        if limit <= 0:
+            return
+        for rnd in range(1, limit + 1):
+            todo = [j for j in self.jobs if j.F is not None and j.morae and j.X is not None and self._is_bad(j)]
+            if not todo:
+                break
+            self.log(f"    再検査 {rnd}/{limit} 回目: 失敗箇所のあるファイル {len(todo)} 件")
+            if rnd == 1 and not self.cfg.model_path:
+                good = [j for j in self.jobs if j.status == "OK" and j.segs and not self._is_bad(j)]
+                if len(good) >= 4:      # 成功したファイルだけでモデルを引き締めてから再解析
+                    items = [(j.X, [(g.unit, g.s, g.e) for g in j.segs if g.e > g.s]) for j in good]
+                    self.model.fit(items)
+            for j in todo:
+                self._check()
+                j.rechecks = rnd
+                j.notes.append(f"再検査 {rnd} 回目")
+                self._final(j, level=rnd)
+            fixed = sum(1 for j in todo if not self._is_bad(j))
+            self.log(f"    再検査 {rnd} 回目の結果: 解決 {fixed} / 残り {len(todo) - fixed}")
+        left = [j for j in self.jobs if j.F is not None and j.morae and self._is_bad(j) and j.rechecks >= limit]
+        for j in left:
+            j.notes.append(f"{limit} 回再検査しても不合格のため終了 (該当箇所は oto.ini に出力しません)")
+        if left:
+            self.log(f"    {limit} 回再検査しても不合格: {len(left)} 件 → 終了")
+
     def _emit(self, root):
         cfg = self.cfg
         bydir = {}
@@ -486,6 +546,14 @@ class Pipeline:
             self.review[d] = review
             self.kept[d] = keep
             if cfg.dry_run:
+                continue
+            if not keep:
+                self.log(f"    {d}: 出力できるエントリが 0 件のため、既存の oto.ini は変更しません")
+                if review:
+                    (d / "oto_review.txt").write_text(
+                        "# 確信度不足・検証失敗のため oto.ini に入れなかった候補\n" +
+                        "\n".join(f"{format_entry(e)}   # {e.status}: {'; '.join(e.notes)}" for e in review) + "\n",
+                        encoding="utf-8")
                 continue
             extra = []
             if cfg.merge:

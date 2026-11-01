@@ -92,12 +92,16 @@ class MoraTiming:
 
 
 def boundary_conf(LL, bnd, idx, prev, seg, cfg):
-    s = seg.s
-    w = max(1, min(6, prev.e - prev.s, seg.e - seg.s))
+    T = LL.shape[1]
+    s = int(min(max(seg.s, 1), T - 1))
+    w = max(1, min(6, prev.e - prev.s, seg.e - seg.s, s, T - s))
     up, un = idx[prev.unit], idx[seg.unit]
-    contrast = float(np.mean(LL[up, s - w:s] - LL[un, s - w:s]) + np.mean(LL[un, s:s + w] - LL[up, s:s + w]))
-    peak = float(np.max(bnd[max(0, s - 3):s + 3])) if len(bnd) else 0.0
-    return max(contrast / cfg.thr_contrast, peak / cfg.thr_bnd)
+    a, b = LL[up, s - w:s] - LL[un, s - w:s], LL[un, s:s + w] - LL[up, s:s + w]
+    contrast = float(a.mean() + b.mean()) if a.size and b.size else 0.0
+    pk = bnd[max(0, s - 3):s + 3]
+    peak = float(pk.max()) if pk.size else 0.0
+    conf = max(contrast / cfg.thr_contrast, peak / cfg.thr_bnd)
+    return float(np.nan_to_num(conf, nan=0.0, posinf=1e3, neginf=-1e3))
 
 
 def build_timings(segs, morae, hop_ms, dur_ms):

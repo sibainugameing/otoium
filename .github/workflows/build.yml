@@ -16,16 +16,16 @@ jobs:
         os:
           - windows-latest
           - macos-latest
-          - ubuntu-latest
+          - ubuntu-24.04
         python-version:
           - "3.11"
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -38,7 +38,7 @@ jobs:
         run: python build.py
 
       - name: Upload executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: otoium-${{ runner.os }}
           path: dist/otoium*

@@ -90,3 +90,23 @@ custom 以外でもこれらを指定するとプリセットの値を上書き�
 引数なしで起動。設定 / 結果 / ログの3タブ。結果タブは波形・音素区間・モーラ状態を表示し、エイリアス行を選ぶと
 Offset / Overlap / Preutterance / Consonant / Cutoff の位置を波形上に表示します。ホイールで拡大縮小、ドラッグで移動。
 設定の保存・読込、実行中の中止に対応。
+
+
+## 自動ビルド
+
+コミットメッセージに `[build]` を含めて push すると、GitHub Actions が Windows / macOS / Linux 向けの実行ファイルを並列ビルドします。
+
+```text
+feat: add feature [build]
+```
+
+ビルド前に `python -m unittest tests.test_otoium -v` を実行し、テストに成功した場合だけ PyInstaller で実行ファイルを生成します。成果物は GitHub リポジトリの **Actions → 対象の Build 実行 → Artifacts** から取得できます（保存期間14日）。
+
+ローカルでビルドする場合:
+
+```bash
+python -m pip install -r requirements-build.txt
+python build.py
+```
+
+生成先は `dist/otoium`（Windows は `dist/otoium.exe`）です。実行ファイルはビルドした OS 向けです。

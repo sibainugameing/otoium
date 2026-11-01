@@ -1,14 +1,13 @@
 name: Build
 
 on:
-  push:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    if: contains(join(github.event.commits.*.message, ' '), '[build]')
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:

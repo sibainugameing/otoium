@@ -66,6 +66,7 @@ class Config:
     alias_suffix: str = ""
     jobs: int = 1
     cache: bool = True
+    track_metrics: bool = True      # 学習の得点を記録・表示
 
     def to_dict(self):
         return asdict(self)

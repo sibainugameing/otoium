@@ -27,7 +27,7 @@ class FrameNet:
         Z = Z - Z.max(1, keepdims=True)
         return Z - np.log(np.exp(Z).sum(1, keepdims=True))
 
-    def fit(self, X, y, w, epochs=6, lr=2e-3, batch=512, smooth=0.05, seed=0, reset_norm=True):
+    def fit(self, X, y, w, epochs=6, lr=2e-3, batch=512, smooth=0.05, seed=0, reset_norm=True, callback=None):
         n_out = self.W[-1].shape[1]
         if reset_norm:
             self.mean = X.mean(0)
@@ -44,7 +44,7 @@ class FrameNet:
         loss = 0.0
         for ep in range(epochs):
             order = rng.permutation(N)
-            loss, cnt_b = 0.0, 0
+            loss, cnt_b, correct, wsum = 0.0, 0, 0.0, 0.0
             for s in range(0, N, batch):
                 ix = order[s:s + batch]
                 xb, yb, wb = Xn[ix], y[ix], w[ix]
@@ -56,6 +56,8 @@ class FrameNet:
                 T[np.arange(len(yb)), yb] += 1.0 - smooth
                 loss += float(-(wb * (T * np.log(P + 1e-12)).sum(1)).mean())
                 cnt_b += 1
+                correct += float((wb * (P.argmax(1) == yb)).sum())
+                wsum += float(wb.sum())
                 g = (P - T) * (wb[:, None] / len(yb))
                 gW, gb = [None] * len(self.W), [None] * len(self.W)
                 for i in range(len(self.W) - 1, -1, -1):
@@ -72,6 +74,8 @@ class FrameNet:
                     p_ -= lr * (m[k] / (1 - 0.9 ** t)) / (np.sqrt(v[k] / (1 - 0.999 ** t)) + 1e-8)
             lr *= 0.8
             loss /= max(1, cnt_b)
+            if callback:
+                callback(ep + 1, loss, correct / max(wsum, 1e-9))
         return loss
 
     def state(self):

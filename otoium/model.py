@@ -80,7 +80,7 @@ class AcousticModel:
         i = np.arange(T)
         return np.hstack([X[np.maximum(i - k, 0)], X, X[np.minimum(i + k, T - 1)]])
 
-    def fit_net(self, items, epochs=6, max_frames=250000, seed=0, ensemble=1):
+    def fit_net(self, items, epochs=6, max_frames=250000, seed=0, ensemble=1, callback=None):
         """items: [(X, segs, w)] の区間をラベルに、フレーム分類器 (アンサンブル) を学習"""
         xs, ys, ws = [], [], []
         for it in items:
@@ -111,7 +111,8 @@ class AcousticModel:
             else:
                 Xk, yk, wk = X, y, w
             losses.append(net.fit(Xk, yk, wk, epochs=epochs if fresh else max(2, epochs // 3),
-                                  lr=2e-3 if fresh else 5e-4, reset_norm=fresh, seed=seed + k))
+                                  lr=2e-3 if fresh else 5e-4, reset_norm=fresh, seed=seed + k,
+                                  callback=(lambda ep, l, a, k=k: callback(k, ep, l, a)) if callback else None))
         return float(np.mean(losses))
 
     def update_durations(self, items, tau=5.0):

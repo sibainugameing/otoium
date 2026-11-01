@@ -10,6 +10,7 @@ from tkinter import ttk, filedialog, messagebox
 from .config import Config, ACCURACY_MODES, resolve
 from .pipeline import Pipeline, Cancelled
 from .phoneset import UNIT_CLASS
+from .metrics import INFO
 
 STATUS_FG = {"OK": "#1b7f3b", "WARN": "#b7791f", "REVIEW": "#c05621", "ERROR": "#c53030", "FAIL": "#c53030"}
 CLASS_BG = {"V": "#9ec5f4", "NN": "#b4bdf2", "N": "#cdb4f2", "S": "#f4cf9e", "H": "#f4e29e", "Z": "#f4b99e",
@@ -24,6 +25,68 @@ def _nice_step(span_ms, target=8):
         if s >= raw:
             return s
     return 10000
+
+
+class MetricChart(tk.Canvas):
+    """学習曲線 (得点の推移)。段階が変わる位置に点線とラベル、最良点に緑の丸を描く"""
+
+    def __init__(self, master, title, better="up", **kw):
+        super().__init__(master, bg="#ffffff", highlightthickness=1, highlightbackground="#cccccc", **kw)
+        self.title, self.better = title, better
+        self.vals, self.stages = [], []
+        self.bind("<Configure>", lambda e: self.redraw())
+
+    def clear(self):
+        self.vals, self.stages = [], []
+        self.redraw()
+
+    def add(self, v, stage=""):
+        self.vals.append(float(v))
+        self.stages.append(stage)
+        self.redraw()
+
+    def best(self):
+        if not self.vals:
+            return None
+        return max(self.vals) if self.better == "up" else min(self.vals)
+
+    def redraw(self):
+        self.delete("all")
+        W, H = max(self.winfo_width(), 120), max(self.winfo_height(), 90)
+        L, R, T, B = 48, 10, 24, 16
+        v = self.vals
+        head = self.title + (f"   現在 {v[-1]:.3f}   最良 {self.best():.3f}" if v else "   (待機中)")
+        self.create_text(8, 11, text=head, anchor="w", font=("", 9, "bold"), fill="#222222")
+        if not v:
+            return
+        lo, hi = min(v), max(v)
+        if hi - lo < 1e-9:
+            lo, hi = lo - 0.5, hi + 0.5
+        pad = (hi - lo) * 0.1
+        lo, hi = lo - pad, hi + pad
+        pw, ph = W - L - R, H - T - B
+        n = len(v)
+        X = lambda i: L + (pw / 2 if n == 1 else i * pw / (n - 1))
+        Y = lambda val: T + (hi - val) / (hi - lo) * ph
+        for k in range(4):
+            val = lo + (hi - lo) * k / 3
+            y = Y(val)
+            self.create_line(L, y, W - R, y, fill="#eeeeee")
+            self.create_text(L - 4, y, text=f"{val:.2f}", anchor="e", font=("", 7), fill="#777777")
+        last = None
+        for i, st in enumerate(self.stages):
+            g = st.split()[0] if st else ""
+            if g != last and i > 0:
+                self.create_line(X(i), T, X(i), H - B, fill="#cccccc", dash=(3, 3))
+                self.create_text(X(i) + 2, H - 7, text=g, anchor="w", font=("", 7), fill="#999999")
+            last = g
+        if n >= 2:
+            self.create_line(*[c for i in range(n) for c in (X(i), Y(v[i]))], fill="#2b6cb0", width=2)
+        if n <= 80:
+            for i in range(n):
+                self.create_oval(X(i) - 2, Y(v[i]) - 2, X(i) + 2, Y(v[i]) + 2, fill="#2b6cb0", outline="")
+        b = v.index(self.best())
+        self.create_oval(X(b) - 4, Y(v[b]) - 4, X(b) + 4, Y(v[b]) + 4, fill="#1b7f3b", outline="white")
 
 
 class WaveView(tk.Canvas):
@@ -164,6 +227,7 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self._build_settings()
+        self._build_training()
         self._build_results()
         self._build_log()
         self.after(100, self._poll)
@@ -303,6 +367,35 @@ class App(tk.Tk):
         tab.columnconfigure(0, weight=1)
         tab.columnconfigure(1, weight=1)
 
+    def _build_training(self):
+        tab = ttk.Frame(self.nb, padding=8)
+        self.nb.add(tab, text="学習")
+        head = ttk.Frame(tab)
+        head.pack(fill="x")
+        self.V["score_text"] = tk.StringVar(value="検証スコア: -")
+        ttk.Label(head, textvariable=self.V["score_text"], font=("", 16, "bold")).pack(side="left")
+        ttk.Label(head, text="   学習の各段階で、固定のファイル集合に対する検証スコア(母音一致・境界確信度・子音確認・不合格率)を測った値。"
+                             "高いほど良い。最高点のモデルを保存し、悪化したら戻します。",
+                  foreground="#666666", wraplength=720).pack(side="left", padx=8)
+        grid = ttk.Frame(tab)
+        grid.pack(fill="both", expand=True, pady=(8, 0))
+        self.charts = {}
+        for i, (key, (title, better)) in enumerate(INFO.items()):
+            c = MetricChart(grid, title + (" ↑" if better == "up" else " ↓"), better, height=170)
+            c.grid(row=i // 2, column=i % 2, sticky="nsew", padx=4, pady=4)
+            self.charts[key] = c
+        for r in range(3):
+            grid.rowconfigure(r, weight=1)
+        for c in range(2):
+            grid.columnconfigure(c, weight=1)
+
+    def _on_metric(self, name, value, stage):
+        ch = self.charts.get(name)
+        if ch is not None:
+            ch.add(value, stage)
+        if name == "score":
+            self.V["score_text"].set(f"検証スコア: {value:.3f}   (最高 {ch.best():.3f} / {stage})")
+
     def _update_mode_info(self):
         try:
             cfg = self.collect_cfg()
@@ -417,7 +510,7 @@ class App(tk.Tk):
         f = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if f:
             with open(f, "w", encoding="utf-8") as fp:
-                json.dump({k: v.get() for k, v in self.V.items() if k not in ("stage", "filter")}, fp, ensure_ascii=False, indent=1)
+                json.dump({k: v.get() for k, v in self.V.items() if k not in ("stage", "filter", "score_text", "mode_info")}, fp, ensure_ascii=False, indent=1)
 
     def load_settings(self):
         f = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
@@ -454,7 +547,11 @@ class App(tk.Tk):
         self.bar["value"] = 0
         self.btn_run.state(["disabled"])
         self.btn_stop.state(["!disabled"])
-        self.pipe = Pipeline(cfg, log=lambda m: self.q.put(("log", m)), progress=lambda f, m="": self.q.put(("prog", (f, m))))
+        for c in self.charts.values():
+            c.clear()
+        self.V["score_text"].set("検証スコア: -")
+        self.pipe = Pipeline(cfg, log=lambda m: self.q.put(("log", m)), progress=lambda f, m="": self.q.put(("prog", (f, m))),
+                             on_metric=lambda n, v, st: self.q.put(("metric", (n, v, st))))
 
         def work():
             try:
@@ -467,7 +564,7 @@ class App(tk.Tk):
 
         self.thread = threading.Thread(target=work, daemon=True)
         self.thread.start()
-        self.nb.select(2)
+        self.nb.select(1)
 
     def stop(self):
         if self.pipe:
@@ -486,13 +583,15 @@ class App(tk.Tk):
                     self.V["stage"].set(v.strip()[:40])
                 elif k == "prog":
                     self.bar["value"] = v[0]
+                elif k == "metric":
+                    self._on_metric(*v)
                 elif k in ("done", "cancel", "err"):
                     self.btn_run.state(["!disabled"])
                     self.btn_stop.state(["disabled"])
                     if k == "done":
                         self.V["stage"].set("完了")
                         self.populate()
-                        self.nb.select(1)
+                        self.nb.select(2)
                     elif k == "cancel":
                         self.V["stage"].set("中止しました")
                     else:

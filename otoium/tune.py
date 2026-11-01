@@ -29,7 +29,7 @@ def _objective(model, subset, cfg):
     return float(np.mean(sc))
 
 
-def autotune(model, jobs, cfg, log, rounds=1, max_files=16):
+def autotune(model, jobs, cfg, log, rounds=1, max_files=16, on_score=None):
     if not jobs:
         return cfg
     step = max(1, len(jobs) // max_files)
@@ -37,6 +37,8 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16):
     subset = [(j, model.loglik(j.F, j.X)) for j in sel]
     best, best_s = cfg, _objective(model, subset, cfg)
     log(f"    自動調整: 初期スコア {best_s:.3f} ({len(sel)} ファイルで評価)")
+    if on_score:
+        on_score(best_s)
     grid, nn_grid = (FINE_GRID, FINE_NN) if rounds >= 3 else (GRID, NN_GRID)
     for r in range(rounds):
         changed = False
@@ -51,6 +53,8 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16):
                 if s > best_s + 1e-4:
                     best_s, subset, changed = s, sub2, True
                     log(f"    自動調整: nn_weight={v} → {s:.3f}")
+                    if on_score:
+                        on_score(s)
                 else:
                     model.nn_weight = old
         for key, vals in grid.items():
@@ -64,6 +68,8 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16):
                 if s > best_s + 1e-4:
                     best, best_s, changed = cand, s, True
                     log(f"    自動調整: {key}={v} → {s:.3f}")
+                    if on_score:
+                        on_score(s)
         if not changed:
             break
     return best

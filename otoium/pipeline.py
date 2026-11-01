@@ -1,4 +1,5 @@
 """パイプライン: 読込 → 特徴 → 自己教師あり学習 → 自動調整 → 評価/救済 → 検証 → oto 生成"""
+import copy
 import hashlib
 import json
 import pickle
@@ -15,6 +16,7 @@ from .aligner import align, AlignmentError
 from .kana import parse_text, TextParseError
 from .verify import STATUS_RANK
 from .evaluate import evaluate
+from .metrics import Tracker
 from .tune import autotune
 from .calibrate import calibrate
 from .aliases import make_entries
@@ -114,8 +116,10 @@ def _load_one(args):
 
 
 class Pipeline:
-    def __init__(self, cfg, log=print, progress=None):
+    def __init__(self, cfg, log=print, progress=None, on_metric=None):
         self.cfg = cfg
+        self.track = Tracker(on_metric, log)
+        self._best_score, self._best_model, self._eval_set = -1e9, None, None
         self.log = log
         self.progress = progress or (lambda frac, msg="": None)
         self.jobs = []
@@ -173,13 +177,20 @@ class Pipeline:
         if self.do_tune:
             self.log("[3/6] 解析パラメータを自動調整中…")
             ok = [j for j in ok if j.status != "FAIL"]
-            self.cfg = autotune(self.model, ok, self.cfg, self.log, self.rounds)
+            self.cfg = autotune(self.model, ok, self.cfg, self.log, self.rounds,
+                                on_score=lambda v: self.track.add("tune_score", v, "自動調整"))
             if not cfg.model_path and self.P["post"] > 0:
-                self._train(ok, self.P["post"], 0.55, 0.6)
+                self._train(ok, self.P["post"], 0.55, 0.6, "再学習")
         else:
             self.log("[3/6] 自動調整: スキップ")
         if self.P["conf"] > 0 and not cfg.model_path:
             self._train_confident([j for j in self.jobs if j.status != "FAIL"], self.P["conf"])
+        if self.cfg.track_metrics and self._best_model is not None and not cfg.model_path:
+            cur = self._eval_score()
+            self.track.add("score", cur, "学習終了", log=True)
+            if self._best_score > cur + 0.003:
+                self.model = self._best_model
+                self.log(f"    得点が最高だったチェックポイント (スコア {self._best_score:.3f}) に戻しました")
         if self.cfg.auto_thresholds:
             ok = [j for j in self.jobs if j.status != "FAIL"]
             self.cfg = calibrate(self.model, ok, self.cfg, self.log)
@@ -189,8 +200,12 @@ class Pipeline:
             self._check()
             self._final(j)
             self.progress(0.62 + 0.28 * (i + 1) / len(fin), j.path.name)
+        if fin:
+            self.track.add("score", float(np.mean([j.score for j in fin if j.status != "FAIL"] or [0.0])), "最終解析", log=True)
         self.log("[5/6] oto.ini を生成中…")
         self._emit(root)
+        if not self.cfg.dry_run and self.track.history:
+            self.track.save(root)
         if self.cfg.save_model and not self.cfg.dry_run and not self.cfg.model_path:
             self.model.save(root / "otoium_model.npz")
         self.log("[6/6] レポート作成中…")
@@ -230,7 +245,7 @@ class Pipeline:
                 j.fail(data)
             self.progress(0.2 * (i + 1) / max(1, len(todo)), j.path.name)
 
-    def _train(self, ok, iters, p0, p1):
+    def _train(self, ok, iters, p0, p1, stage="学習"):
         cfg = self.cfg
         prev = {}
         for it in range(iters):
@@ -262,13 +277,41 @@ class Pipeline:
                 items = [(X, sg, wt) for (X, sg), wt in zip(items, w) if wt > 0]
             self.model.fit(items)
             if self.model.net is not None:
-                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
+                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
             conv = float(np.mean(shift)) if shift else None
-            self.log(f"    学習 {it + 1}/{iters}: {len(items)} ファイル使用" + (f", 境界変化 {conv:.2f} フレーム" if conv is not None else ""))
+            self.track.add("ll", float(np.mean(scores)), stage)
+            if conv is not None:
+                self.track.add("shift", conv, stage)
+            self._checkpoint(f"{stage} {it + 1}/{iters}")
+            self.log(f"    {stage} {it + 1}/{iters}: {len(items)} ファイル使用" + (f", 境界変化 {conv:.2f} フレーム" if conv is not None else ""))
             self.progress(p0 + (p1 - p0) * (it + 1) / iters, "学習")
             if conv is not None and conv < 0.1:
                 self.log("    収束したため学習を終了")
                 break
+
+    def _eval_score(self):
+        """学習の進行を測る得点: 固定のファイル集合に対する検証スコアの平均 (高いほど良い)"""
+        if self._eval_set is None:
+            cand = [j for j in self.jobs if j.status != "FAIL" and j.X is not None]
+            step = max(1, len(cand) // 10)
+            self._eval_set = cand[::step][:10]
+        sc = []
+        for j in self._eval_set:
+            if j.status == "FAIL":
+                continue
+            try:
+                sc.append(evaluate(self.model, j.F, j.X, j.morae, j.dur_ms, self.cfg).score)
+            except (AlignmentError, ValueError, KeyError):
+                sc.append(-3.0)
+        return float(np.mean(sc)) if sc else -3.0
+
+    def _checkpoint(self, stage):
+        if not self.cfg.track_metrics:
+            return
+        sc = self._eval_score()
+        self.track.add("score", sc, stage, log=True)
+        if sc > self._best_score:
+            self._best_score, self._best_model = sc, copy.deepcopy(self.model)
 
     def _train_net(self, ok):
         """アライメント結果を教師にニューラル音響モデルを学習し、ガウスモデルと併用する"""
@@ -283,10 +326,18 @@ class Pipeline:
             except AlignmentError:
                 continue
             items.append((j.X, [(s.unit, s.s, s.e) for s in segs if s.e > s.s], 1.0))
-        loss = self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
+        loss = self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
         self.model.nn_weight = self.cfg.nn_weight
         self.log(f"    ニューラルモデル学習完了 (アンサンブル {len(self.model.nets)}, loss {loss:.3f}, 重み {self.model.nn_weight})")
-        self._train(ok, 2, 0.45, 0.55)
+        self._checkpoint("NN学習後")
+        self._train(ok, 2, 0.45, 0.55, "NN併用学習")
+
+    def _nn_cb(self, k, ep, loss, acc):
+        self._nn_step = getattr(self, "_nn_step", 0) + 1
+        self.track.add("nn_loss", loss, f"NN#{k + 1}")
+        self.track.add("nn_acc", acc, f"NN#{k + 1}")
+        if self._nn_step % 5 == 0:
+            self.log(f"    NN#{k + 1} epoch {ep}: loss {loss:.3f} acc {acc:.3f} {self.track.spark('nn_loss')}")
 
     def _train_confident(self, ok, rounds):
         """検証スコアの高いファイルだけを重み付きで使い、誤整列に引きずられないよう再学習する"""
@@ -313,7 +364,8 @@ class Pipeline:
                 items.append((j.X, [(g.unit, g.s, g.e) for g in res.segs if g.e > g.s], w))
             self.model.fit(items)
             if self.model.nets:
-                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
+                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
+            self._checkpoint(f"高信頼再学習 {r + 1}/{rounds}")
             self.log(f"    高信頼再学習 {r + 1}/{rounds}: {len(items)}/{len(scored)} ファイル使用")
 
     @staticmethod

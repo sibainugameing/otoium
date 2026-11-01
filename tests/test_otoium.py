@@ -177,6 +177,22 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
             self.assertEqual(len(AcousticModel.load(Path(d) / "otoium_model.npz").nets), 2)
             self.assertTrue(any(abs(v - 0.0) > 1e-9 for v in p.model.dur_mu.values()))
 
+    def test_training_metrics_recorded(self):
+        events = []
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            p = Pipeline(Config(mode="vcv", accuracy="high"), log=lambda m: None,
+                         on_metric=lambda n, v, st: events.append((n, v, st)))
+            p.run(d)
+            h = p.track.history
+            self.assertGreaterEqual(len(h["score"]), 4)
+            self.assertGreaterEqual(max(v for _, v, _ in h["score"]), h["score"][0][1])
+            nl = [v for _, v, _ in h["nn_loss"]]
+            self.assertLess(nl[-1], nl[0])
+            self.assertTrue(any(e[0] == "nn_acc" for e in events))
+            self.assertTrue((Path(d) / "otoium_training.csv").exists())
+            self.assertTrue((Path(d) / "otoium_training.json").exists())
+
     def test_resolve_presets(self):
         from otoium.config import resolve
         self.assertFalse(resolve(Config(accuracy="fast"))["net"])

@@ -141,6 +141,51 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
             self.assertTrue((Path(d) / "_あかさたな.TextGrid").exists())
             self.assertTrue((Path(d) / "otoium_model.npz").exists())
 
+    def test_moraic_nasal_only_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d, BANK + ["_んん", "_んんん"])
+            p, rep = run(d, mode="vcv")
+            st = {f["file"]: f["status"] for f in rep["files"]}
+            self.assertEqual(st["_んん.wav"], "OK")
+            self.assertEqual(st["_んんん.wav"], "OK")
+            self.assertEqual([a[0] for a in read_oto(d)["_んん.wav"]], ["ん", "ん ん"])
+
+    def test_net_calibration_and_model_roundtrip(self):
+        from otoium.model import AcousticModel
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            p, rep = run(d, mode="vcv", accuracy="high")
+            self.assertIsNotNone(p.model.net)
+            m = AcousticModel.load(Path(d) / "otoium_model.npz")
+            self.assertIsNotNone(m.net)
+            self.assertEqual(rep["failed"], 0)
+            # 保存モデルの再利用
+            p2, rep2 = run(d, mode="vcv", model_path=str(Path(d) / "otoium_model.npz"))
+            self.assertEqual(rep2["failed"], 0)
+
+    def test_custom_mode_ensemble_and_confident_retrain(self):
+        from otoium.model import AcousticModel
+        with tempfile.TemporaryDirectory() as d:
+            for i, t in enumerate(BANK):
+                x, _ = render(t, seed=i, tempo=0.8 + 0.07 * i, blur=0.03, reverb=0.5, noise=0.02, jitter=0.05)
+                write_wav(Path(d) / f"{t}.wav", x)
+            p, rep = run(d, mode="vcv", accuracy="custom", train_iters=3, tune_rounds=1, net_epochs=4,
+                         net_ensemble=2, adapt_rounds=2, post_iters=1, confident_rounds=1)
+            self.assertEqual(len(p.model.nets), 2)
+            self.assertEqual(rep["failed"], 0)
+            self.assertEqual([a[0] for a in read_oto(d)["_あかさたな.wav"]], ["あ", "あ か", "か さ", "さ た", "た な"])
+            self.assertEqual(len(AcousticModel.load(Path(d) / "otoium_model.npz").nets), 2)
+            self.assertTrue(any(abs(v - 0.0) > 1e-9 for v in p.model.dur_mu.values()))
+
+    def test_resolve_presets(self):
+        from otoium.config import resolve
+        self.assertFalse(resolve(Config(accuracy="fast"))["net"])
+        u, m = resolve(Config(accuracy="ultra")), resolve(Config(accuracy="max"))
+        self.assertGreater(u["iters"], m["iters"])
+        self.assertGreater(u["ens"], m["ens"])
+        c = resolve(Config(accuracy="custom", train_iters=20, tune_rounds=0, adapt_rounds=0))
+        self.assertEqual((c["iters"], c["tune"], c["adapt"]), (20, False, False))
+
     def test_whole_8mora_script_parses(self):
         path = Path(__file__).resolve().parents[1] / "scripts" / "8mora.txt"
         for line in path.read_text(encoding="utf-8").split():

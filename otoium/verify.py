@@ -32,6 +32,8 @@ def accepted_groups(u):
         "N": {"N", "u"}, "FR": {"FR"}, "CL": {"CL", "SIL"}, "BR": {"BR", "FR", "CL"}, "SM": {"SM", "N", "CL", "u", "i"},
     }
     acc = set(extra.get(g, {g}))
+    if u.startswith("nas"):
+        acc |= {"u", "o"}       # 残響下の子音の鼻音は低い母音と区別しにくい
     if u in ("frH", "frHY", "frF"):
         acc |= {"SIL"}
     if u in ("frZ", "frJ", "clv"):
@@ -159,19 +161,23 @@ def assess(timings, segs, LL, F, model, labels, cfg):
         confs = [ss[0].bconf, vseg.bconf]
         t.bconf = float(min(confs))
         t.notes = []
+        i0 = real.index(ss[0])
+        if i0 > 0 and real[i0 - 1].unit == ss[0].unit == "NN":
+            t.bconf = max(t.bconf, 1.0)
+            t.notes.append("ん の連続は音響的に境界を特定できないため推定位置")
         if t.agree_v < cfg.fail_agree:
             t.status = "ERROR"
             t.notes.append(f"母音の独立認識が不一致 (期待 {vseg.unit} / 認識 {t.rec_vowel}, 一致率 {t.agree_v:.2f})")
         elif t.agree_v < cfg.ok_agree:
             t.status = "REVIEW"
             t.notes.append(f"母音の一致率が低い ({t.agree_v:.2f}, 認識 {t.rec_vowel})")
-        elif t.cons_agree < 0.34:
+        elif t.cons_agree < cfg.cons_review:
             t.status = "REVIEW"
             t.notes.append(f"子音が音響的に確認できない (期待 {t.mora.cons} / 認識 {t.rec_cons or '-'}, 一致率 {t.cons_agree:.2f})")
         elif t.bconf < 0.5:
             t.status = "REVIEW"
             t.notes.append(f"音素境界が不明瞭 (確信度 {t.bconf:.2f})")
-        elif t.bconf < 1.0 or t.cons_agree < 0.6:
+        elif t.bconf < 1.0 or t.cons_agree < cfg.cons_warn:
             t.status = "WARN"
             t.notes.append(f"境界確信度 {t.bconf:.2f} / 子音一致率 {t.cons_agree:.2f}")
         else:
@@ -179,15 +185,17 @@ def assess(timings, segs, LL, F, model, labels, cfg):
     # ファイル単位: 独立に検出した母音/鼻音核の数 と 期待モーラ数
     nuclei = 0
     run, cur = 0, -1
-    vn = {GIDX[g] for g in "aiueo"}
+    only_n = all(t.mora.vowel == "N" for t in timings)
+    vn = {GIDX["N"]} if only_n else {GIDX[g] for g in "aiueo"}
+    min_run = 6 if only_n else 4
     for x in list(labels) + [-1]:
         if x == cur:
             run += 1
         else:
-            if cur in vn and run >= 4:
+            if cur in vn and run >= min_run:
                 nuclei += 1
             cur, run = x, 1
-    exp = max(1, sum(1 for t in timings if t.mora.vowel != "N"))
+    exp = 1 if only_n else max(1, sum(1 for t in timings if t.mora.vowel != "N"))
     ratio = nuclei / exp
     file_status = "OK"
     mean_agree = float(np.mean([t.agree_v for t in timings]))
@@ -198,7 +206,7 @@ def assess(timings, segs, LL, F, model, labels, cfg):
     elif ratio < 0.5 or mean_agree < 0.35:
         file_status = "FAIL"
         notes.append(f"分割失敗: 独立検出した母音核 {nuclei} / 期待 {exp}, 平均母音一致率 {mean_agree:.2f}")
-    if file_status == "OK" and (ratio < 0.75 or ratio > 1.8):
+    if file_status == "OK" and not only_n and (ratio < 0.75 or ratio > 1.8):
         file_status = "WARN"
         notes.append(f"母音核数が期待と乖離: 検出 {nuclei} / 期待 {exp}")
     return file_status, notes, nuclei

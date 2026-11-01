@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 import numpy as np
 from .audio_io import read_wav
-from .config import PRESETS
+from .config import resolve
 from .features import extract, SilentAudioError
 from .model import AcousticModel
 from .aligner import align, AlignmentError
@@ -16,14 +16,19 @@ from .kana import parse_text, TextParseError
 from .verify import STATUS_RANK
 from .evaluate import evaluate
 from .tune import autotune
+from .calibrate import calibrate
 from .aliases import make_entries
 from .oto import write_oto, format_entry, read_lines
 from .export import write_labels, write_textgrid
 
 RESCUE_VARIANTS = [
     dict(pause_penalty=0.5), dict(pause_penalty=5.0, duration_weight=1.0), dict(boundary_weight=8.0),
-    dict(boundary_weight=1.0, duration_weight=0.2), dict(free_switch_penalty=5.0),
+    dict(boundary_weight=1.0, duration_weight=0.2),
 ]
+
+
+class Cancelled(RuntimeError):
+    pass
 
 
 class FileJob:
@@ -116,14 +121,24 @@ class Pipeline:
         self.jobs = []
         self.model = None
         self.report = {}
-        pr = PRESETS[cfg.accuracy]
-        self.iters = cfg.train_iters or pr["iters"]
-        self.do_tune = pr["tune"] if cfg.auto_tune is None else cfg.auto_tune
-        self.rounds = pr["rounds"] if pr["tune"] else 1
-        self.do_rescue = pr["rescue"] if cfg.rescue is None else cfg.rescue
+        self.P = resolve(cfg)
+        self.iters = self.P["iters"]
+        self.do_tune = self.P["tune"]
+        self.rounds = max(1, self.P["rounds"])
+        self.do_rescue = self.P["rescue"]
+        self.do_net = self.P["net"]
+        self.do_adapt = self.P["adapt"]
+        self.cancelled = False
         self.review = {}
         self.dropped = []
         self.kept = {}
+
+    def cancel(self):
+        self.cancelled = True
+
+    def _check(self):
+        if self.cancelled:
+            raise Cancelled("中止しました")
 
     # ------------------------------------------------------------------
     def run(self, root):
@@ -148,21 +163,30 @@ class Pipeline:
         else:
             self.model = AcousticModel(cfg.mfcc_weight, cfg.delta_weight)
             self.model.set_norm([j.F for j in ok])
+        self.model.hop_ms = cfg.hop_ms
         for j in ok:
             j.X = self.model.design(j.F)
         if not cfg.model_path:
-            self._train(ok, self.iters, 0.2, 0.55)
+            self._train(ok, self.iters, 0.2, 0.45)
+            if self.do_net:
+                self._train_net(ok)
         if self.do_tune:
             self.log("[3/6] 解析パラメータを自動調整中…")
             ok = [j for j in ok if j.status != "FAIL"]
             self.cfg = autotune(self.model, ok, self.cfg, self.log, self.rounds)
-            if not cfg.model_path:
-                self._train(ok, 2, 0.55, 0.62)
+            if not cfg.model_path and self.P["post"] > 0:
+                self._train(ok, self.P["post"], 0.55, 0.6)
         else:
             self.log("[3/6] 自動調整: スキップ")
+        if self.P["conf"] > 0 and not cfg.model_path:
+            self._train_confident([j for j in self.jobs if j.status != "FAIL"], self.P["conf"])
+        if self.cfg.auto_thresholds:
+            ok = [j for j in self.jobs if j.status != "FAIL"]
+            self.cfg = calibrate(self.model, ok, self.cfg, self.log)
         self.log("[4/6] 最終アライメント・独立検証・救済…")
         fin = [j for j in self.jobs if j.status != "FAIL"]
         for i, j in enumerate(fin):
+            self._check()
             self._final(j)
             self.progress(0.62 + 0.28 * (i + 1) / len(fin), j.path.name)
         self.log("[5/6] oto.ini を生成中…")
@@ -199,6 +223,7 @@ class Pipeline:
 
     def _collect(self, todo, results):
         for i, (j, (st, data)) in enumerate(zip(todo, results)):
+            self._check()
             if st == "ok":
                 j.dur_ms, j.F, j.env = data
             else:
@@ -209,6 +234,7 @@ class Pipeline:
         cfg = self.cfg
         prev = {}
         for it in range(iters):
+            self._check()
             items, scores, shift = [], [], []
             for j in ok:
                 if j.status == "FAIL":
@@ -235,12 +261,85 @@ class Pipeline:
                 w = [x * (0.5 + 0.5 * min(1.0, max(0.0, (s - (med - 3 * mad)) / (3 * mad)))) for x, s in zip(w, scores)]
                 items = [(X, sg, wt) for (X, sg), wt in zip(items, w) if wt > 0]
             self.model.fit(items)
+            if self.model.net is not None:
+                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
             conv = float(np.mean(shift)) if shift else None
             self.log(f"    学習 {it + 1}/{iters}: {len(items)} ファイル使用" + (f", 境界変化 {conv:.2f} フレーム" if conv is not None else ""))
             self.progress(p0 + (p1 - p0) * (it + 1) / iters, "学習")
             if conv is not None and conv < 0.1:
                 self.log("    収束したため学習を終了")
                 break
+
+    def _train_net(self, ok):
+        """アライメント結果を教師にニューラル音響モデルを学習し、ガウスモデルと併用する"""
+        self.log("    ニューラル音響モデルを学習中…")
+        items = []
+        for j in ok:
+            self._check()
+            if j.status == "FAIL":
+                continue
+            try:
+                segs, _, _ = align(self.model, j.F, j.morae, self.cfg, LL=self.model.loglik(j.F, j.X))
+            except AlignmentError:
+                continue
+            items.append((j.X, [(s.unit, s.s, s.e) for s in segs if s.e > s.s], 1.0))
+        loss = self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
+        self.model.nn_weight = self.cfg.nn_weight
+        self.log(f"    ニューラルモデル学習完了 (アンサンブル {len(self.model.nets)}, loss {loss:.3f}, 重み {self.model.nn_weight})")
+        self._train(ok, 2, 0.45, 0.55)
+
+    def _train_confident(self, ok, rounds):
+        """検証スコアの高いファイルだけを重み付きで使い、誤整列に引きずられないよう再学習する"""
+        for r in range(rounds):
+            scored = []
+            for j in ok:
+                self._check()
+                try:
+                    res = evaluate(self.model, j.F, j.X, j.morae, j.dur_ms, self.cfg)
+                except (AlignmentError, ValueError, KeyError):
+                    continue
+                if res.status == "FAIL":
+                    continue
+                scored.append((res.score, j, res))
+            if len(scored) < 4:
+                return
+            sc = np.array([x[0] for x in scored])
+            lo, hi = np.percentile(sc, 30), np.percentile(sc, 90) + 1e-6
+            items = []
+            for s_, j, res in scored:
+                if s_ < lo:
+                    continue
+                w = 0.4 + 0.6 * float(np.clip((s_ - lo) / (hi - lo), 0, 1))
+                items.append((j.X, [(g.unit, g.s, g.e) for g in res.segs if g.e > g.s], w))
+            self.model.fit(items)
+            if self.model.nets:
+                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"])
+            self.log(f"    高信頼再学習 {r + 1}/{rounds}: {len(items)}/{len(scored)} ファイル使用")
+
+    @staticmethod
+    def _tail_is_silent(segs, F):
+        """最後の無音区間に有声・有意なエネルギーが残っていないか"""
+        real = [g for g in segs if g.e > g.s]
+        vd = [g.e - g.s for g in real if g.kind == "v"]
+        if len(vd) >= 3 and vd[-1] > 1.6 * float(np.median(vd[:-1])):
+            return False            # 最後の母音だけ極端に長い = 余った音を引き延ばして吸収している
+        lastv = [g for g in real if g.kind == "v"][-1]
+        ev = F.cls[lastv.s:lastv.e, 0]
+        if len(ev) >= 8 and float(np.percentile(ev, 10)) < float(np.median(ev)) - 1.0:
+            return False            # 母音の途中に 10dB 以上の谷 = 別の音(子音)を含んでいる
+        last = real[-1]
+        if last.kind != "pau":
+            return False
+        e = F.cls[last.s:last.e, 0]
+        return len(e) == 0 or float(np.percentile(e, 90)) < -1.8
+
+    def _rate(self, segs):
+        """この録音の発話速度比 (母音長 / 学習済み平均母音長) を中央値で推定"""
+        v = []
+        for g in segs:
+            if g.e > g.s and g.kind == "v" and g.s_ms is not None:
+                v.append(np.log(max(g.e_ms - g.s_ms, 5.0) / np.exp(self.model.dur_mu[g.unit])))
+        return float(np.clip(np.exp(np.median(v)), 0.6, 1.7)) if v else 1.0
 
     def _need_rescue(self, r):
         if r.status != "OK":
@@ -250,12 +349,30 @@ class Pipeline:
 
     def _final(self, j):
         cfg = self.cfg
+        mdl = self.model
         try:
-            LL = self.model.loglik(j.F, j.X)
-            best = evaluate(self.model, j.F, j.X, j.morae, j.dur_ms, cfg, LL=LL)
+            LLb = mdl.loglik(j.F, j.X)
+            LL = LLb
+            best = evaluate(mdl, j.F, j.X, j.morae, j.dur_ms, cfg, LL=LL)
         except (AlignmentError, ValueError, KeyError) as ex:
             best = None
+            LLb = LL = None
             j.notes.append(f"初回解析失敗: {ex}")
+        rate = 1.0
+        if self.do_adapt and best is not None:
+            for _ in range(self.P["adapt_rounds"]):
+                try:
+                    rt = self._rate(best.segs)
+                    m2 = self.model.adapt(j.X, [(g.unit, g.s, g.e) for g in best.segs if g.e > g.s])
+                    LL2 = m2.loglik(j.F, j.X)
+                    r2 = evaluate(m2, j.F, j.X, j.morae, j.dur_ms, cfg, LL=LL2, vmodel=self.model, vLL=LLb, rate=rt)
+                except (AlignmentError, ValueError, KeyError):
+                    break
+                if r2.score > best.score + 0.01:
+                    j.notes.append(f"録音への適応で改善 (スコア {best.score:.2f} → {r2.score:.2f}, 速度比 {rt:.2f})")
+                    best, mdl, LL, rate = r2, m2, LL2, rt
+                else:
+                    break
         if self.do_rescue and (best is None or self._need_rescue(best)):
             base = best.score if best else -9.0
             cands = []
@@ -266,12 +383,14 @@ class Pipeline:
                 cands.append((cfg, j.morae[:-k], f"録音が台本より末尾 {k} モーラ短いと判断"))
             for c, mo, why in cands:
                 try:
-                    r = evaluate(self.model, j.F, j.X, mo, j.dur_ms, c, LL=LL)
+                    r = evaluate(mdl, j.F, j.X, mo, j.dur_ms, c, LL=LL, vmodel=self.model, vLL=LLb, rate=rate)
                 except (AlignmentError, ValueError, KeyError):
                     continue
                 need = 0.15 if len(mo) != n else 0.05
                 if len(mo) != n and (r.status != "OK" or any(STATUS_RANK[t.status] >= 2 for t in r.timings)):
                     continue
+                if len(mo) != n and not self._tail_is_silent(r.segs, j.F):
+                    continue        # 末尾を削ると、説明できない発声が残る → 採用しない
                 if r.score > (best.score if best else -9.0) + need and r.status != "FAIL":
                     best = r
                     best.notes = best.notes + [f"救済: {why}"]
@@ -357,7 +476,7 @@ class Pipeline:
         n_rev = sum(len(v) for v in self.review.values())
         self.report = {"seconds": round(sec, 1), "files": files, "total": len(self.jobs), "failed": n_fail,
                        "warned": n_warn, "entries_written": n_ent, "entries_review": n_rev,
-                       "config": self.cfg.to_dict()}
+                       "config": self.cfg.to_dict(), "nn_weight": self.model.nn_weight}
         if not self.cfg.dry_run:
             (root / "otoium_report.json").write_text(json.dumps(self.report, ensure_ascii=False, indent=1), encoding="utf-8")
             lines = [f"otoium レポート (処理 {sec:.1f}s)", f"ファイル {len(self.jobs)} / 失敗 {n_fail} / 警告 {n_warn}",

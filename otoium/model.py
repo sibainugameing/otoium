@@ -1,6 +1,9 @@
 """自己教師あり音響モデル: 音素ユニットごとの対角ガウス (クラス事前分布 + MAP 再推定)"""
+import copy
 import numpy as np
-from .phoneset import UNITS, UNIT_CLASS, CLASS_PRIOR, VOWEL_F, N_CLS, N_MFCC, N_DELTA, D
+from .mlp import FrameNet
+import math
+from .phoneset import UNITS, UNIT_CLASS, CLASS_PRIOR, VOWEL_F, N_CLS, N_MFCC, N_DELTA, D, DUR_SIGMA
 
 LL_FLOOR = 12.0
 
@@ -26,6 +29,21 @@ class AcousticModel:
         self.dstd = np.ones(N_DELTA)
         self.w = np.r_[np.ones(N_CLS), np.full(N_MFCC, mfcc_weight), np.full(N_DELTA, delta_weight)]
         self.trained = False
+        self.nets = []
+        self.nn_weight = 0.0
+        self.hop_ms = 5.0
+        # 音素ごとの時間長分布 (対数ms の平均/標準偏差, 最大ms): 事前分布から開始し学習で話者の速度に適応
+        self.dur_mu, self.dur_sd, self.dur_max = {}, {}, {}
+        for u in self.units:
+            c = UNIT_CLASS[u]
+            _, _, _, dmax, dmean = CLASS_PRIOR[c]
+            self.dur_mu[u] = math.log(dmean)
+            self.dur_sd[u] = DUR_SIGMA.get(c, 0.7)
+            self.dur_max[u] = float(dmax)
+
+    @property
+    def net(self):
+        return self.nets[0] if self.nets else None
 
     def set_norm(self, feats):
         rows = [(f.mfcc[f.cls[:, 0] > -3.5], f.dmfcc[f.cls[:, 0] > -3.5]) for f in feats if f is not None]
@@ -50,7 +68,93 @@ class AcousticModel:
             lp = -0.5 * z * z - 0.5 * np.log(self.var[k]) - 0.9189
             np.maximum(lp, -LL_FLOOR, out=lp)
             LL[k] = lp @ self.w
+        if self.nets and self.nn_weight > 0:
+            S = self.splice(X)
+            lp = np.mean([n.logpost(S) - n.logprior for n in self.nets], axis=0)
+            LL += self.nn_weight * np.clip(lp, -12.0, 12.0).T
         return LL
+
+    @staticmethod
+    def splice(X, k=3):
+        T = len(X)
+        i = np.arange(T)
+        return np.hstack([X[np.maximum(i - k, 0)], X, X[np.minimum(i + k, T - 1)]])
+
+    def fit_net(self, items, epochs=6, max_frames=250000, seed=0, ensemble=1):
+        """items: [(X, segs, w)] の区間をラベルに、フレーム分類器 (アンサンブル) を学習"""
+        xs, ys, ws = [], [], []
+        for it in items:
+            X, segs = it[0], it[1]
+            wt = it[2] if len(it) > 2 else 1.0
+            S = self.splice(X)
+            for u, s, e in segs:
+                L = e - s
+                if L <= 0:
+                    continue
+                a, b = (s + int(0.15 * L), e - int(0.15 * L)) if L >= 5 else (s, e)
+                if b <= a:
+                    a, b = s, e
+                xs.append(S[a:b])
+                ys.append(np.full(b - a, self.idx[u]))
+                ws.append(np.full(b - a, wt))
+        if not xs:
+            return None
+        X, y, w = np.concatenate(xs), np.concatenate(ys), np.concatenate(ws)
+        fresh = not self.nets
+        if fresh:
+            self.nets = [FrameNet(X.shape[1], len(self.units), seed=seed + k) for k in range(max(1, ensemble))]
+        losses = []
+        for k, net in enumerate(self.nets):
+            if len(X) > max_frames:
+                ix = np.random.default_rng(seed + k).choice(len(X), max_frames, replace=False)
+                Xk, yk, wk = X[ix], y[ix], w[ix]
+            else:
+                Xk, yk, wk = X, y, w
+            losses.append(net.fit(Xk, yk, wk, epochs=epochs if fresh else max(2, epochs // 3),
+                                  lr=2e-3 if fresh else 5e-4, reset_norm=fresh, seed=seed + k))
+        return float(np.mean(losses))
+
+    def update_durations(self, items, tau=5.0):
+        """整列結果から音素ごとの時間長分布を MAP 推定 (ms)。話者の発話速度に適応する"""
+        acc = {}
+        for it in items:
+            for u, s, e in it[1]:
+                if u != "pau" and e > s:
+                    acc.setdefault(u, []).append(math.log(max((e - s) * self.hop_ms, 1.0)))
+        for u, v in acc.items():
+            n = len(v)
+            if n < 4:
+                continue
+            m, var = float(np.mean(v)), float(np.var(v))
+            pm, ps = self.dur_mu[u], self.dur_sd[u]
+            nm = (n * m + tau * pm) / (n + tau)
+            nv = (n * (var + (m - nm) ** 2) + tau * (ps ** 2 + (pm - nm) ** 2)) / (n + tau)
+            self.dur_mu[u] = nm
+            self.dur_sd[u] = float(np.clip(math.sqrt(nv), 0.25, 0.9))
+            self.dur_max[u] = max(self.dur_max[u], float(np.exp(np.max(v))) * 1.3)
+
+    def adapt(self, X, segs, tau=40.0):
+        """1ファイルの整列結果に平均・分散を寄せた複製を返す (話者/マイク/部屋への適応)"""
+        m = copy.copy(self)
+        m.mu, m.var = self.mu.copy(), self.var.copy()
+        acc = {}
+        for u, s, e in segs:
+            L = e - s
+            if L <= 0:
+                continue
+            a, b = (s + int(0.2 * L), e - int(0.2 * L)) if L >= 5 else (s, e)
+            acc.setdefault(u, []).append(X[a:max(b, a + 1)])
+        for u, xs in acc.items():
+            x = np.concatenate(xs)
+            if len(x) < 3:
+                continue
+            k = self.idx[u]
+            mm, vv = x.mean(0), np.maximum(x.var(0), 1e-6)
+            n = len(x)
+            nm = (n * mm + tau * self.mu[k]) / (n + tau)
+            nv = (n * (vv + (mm - nm) ** 2) + tau * (self.var[k] + (self.mu[k] - nm) ** 2)) / (n + tau)
+            m.mu[k], m.var[k] = nm, np.maximum(nv, 0.5 * self.var[k])
+        return m
 
     def fit(self, items, tau_cls=20.0, tau_mfcc=10.0):
         """items: [(X, [(unit, s, e), ...], weight)] または [(X, segs)]"""
@@ -94,11 +198,16 @@ class AcousticModel:
             nv = (n[k] * (v + (m - nm) ** 2) + tau * (pv + (pm - nm) ** 2)) / (n[k] + tau)
             floor = np.r_[(0.15 * np.sqrt(self.prior_var[k, :N_CLS])) ** 2, np.full(N_MFCC + N_DELTA, 0.15)]
             self.mu[k], self.var[k] = nm, np.maximum(nv, floor)
+        self.update_durations(items)
         self.trained = True
 
     def save(self, path):
-        np.savez(path, mu=self.mu, var=self.var, cmean=self.cmean, cstd=self.cstd, dstd=self.dstd,
-                 units=np.array(self.units), w=self.w)
+        d = dict(mu=self.mu, var=self.var, cmean=self.cmean, cstd=self.cstd, dstd=self.dstd,
+                 units=np.array(self.units), w=self.w, nn_weight=np.array(self.nn_weight),
+                 dur=np.array([[self.dur_mu[u], self.dur_sd[u], self.dur_max[u]] for u in self.units]))
+        for k, net in enumerate(self.nets):
+            d.update({f"net{k}_" + key: v for key, v in net.state().items()})
+        np.savez(path, **d)
 
     @classmethod
     def load(cls, path):
@@ -108,4 +217,14 @@ class AcousticModel:
             raise ValueError("モデルの構成が現在のバージョンと一致しません")
         m.mu, m.var, m.cmean, m.cstd, m.dstd, m.w = z["mu"], z["var"], z["cmean"], z["cstd"], z["dstd"], z["w"]
         m.trained = True
+        if "dur" in z.files:
+            for u, (a, b, c) in zip(m.units, z["dur"]):
+                m.dur_mu[u], m.dur_sd[u], m.dur_max[u] = float(a), float(b), float(c)
+        k = 0
+        while f"net{k}_nl" in z.files:
+            pre = f"net{k}_"
+            m.nets.append(FrameNet.from_state({key[len(pre):]: z[key] for key in z.files if key.startswith(pre)}))
+            k += 1
+        if m.nets:
+            m.nn_weight = float(z["nn_weight"])
         return m

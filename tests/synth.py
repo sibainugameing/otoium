@@ -76,10 +76,12 @@ def _unit(u, dur, nxt_v, f0, rng):
     raise KeyError(u)
 
 
-def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR):
+def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR, tempo=1.0, blur=0.0, reverb=0.0, noise=0.0, jitter=0.0):
     """returns (audio float32, truth) truth=[(mora_idx, unit, start_s, end_s)]"""
     rng = np.random.default_rng(seed)
     morae = parse_text(text)
+    if blur > 0:
+        return _render_blur(morae, rng, f0, lead, trail, tempo, blur, reverb, noise, jitter)
     parts = [0.001 * rng.standard_normal(int(lead * SR))]
     t = lead
     truth = []
@@ -87,7 +89,7 @@ def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR):
         us = m.units
         nxt_v = m.vowel
         for u in us:
-            dur = DUR[u] * (1 + 0.15 * rng.standard_normal() * 0.5)
+            dur = DUR[u] * tempo * (1 + 0.15 * rng.standard_normal() * 0.5)
             y = _unit(u, dur, nxt_v, f0 * (1 + 0.04 * rng.standard_normal()), rng)
             k = min(int(0.004 * SR), len(y) // 3)
             if k > 0:
@@ -112,3 +114,38 @@ def write_wav(path, x):
         w.setsampwidth(2)
         w.setframerate(SR)
         w.writeframes(a.tobytes())
+
+
+def _render_blur(morae, rng, f0, lead, trail, tempo, blur, reverb, noise, jitter):
+    """音素を重ねて接続 (調音結合の模擬)・ピッチの揺らぎ・残響・ノイズ付き"""
+    ov = int(blur * SR)
+    units = []
+    for mi, m in enumerate(morae):
+        for u in m.units:
+            dur = DUR[u] * tempo * (1 + 0.25 * rng.standard_normal() * 0.5)
+            dur = max(dur, 0.012)
+            y = _unit(u, dur, m.vowel, f0 * (1 + jitter * rng.standard_normal()), rng)
+            units.append((mi, u, y))
+    total = int(lead * SR) + sum(len(y) for _, _, y in units) - ov * len(units) + int(trail * SR) + 2 * ov
+    x = 0.001 * rng.standard_normal(total)
+    pos = int(lead * SR)
+    truth = []
+    for mi, u, y in units:
+        o = min(ov, len(y) // 2)
+        y = y.copy()
+        if o > 0:
+            ramp = np.linspace(0, 1, o)
+            y[:o] *= ramp
+            y[-o:] *= ramp[::-1]
+        x[pos:pos + len(y)] += y
+        truth.append((mi, u, (pos + o / 2) / SR, (pos + len(y) - o / 2) / SR))
+        pos += len(y) - o
+    if reverb > 0:
+        n = int(0.25 * SR)
+        ir = rng.standard_normal(n) * np.exp(-6.9 * np.arange(n) / (0.25 * SR))
+        ir[0] = 0
+        x = x + reverb * np.convolve(x, ir / np.abs(ir).sum() * 8, "full")[:len(x)]
+    if noise > 0:
+        x = x + noise * np.max(np.abs(x)) * rng.standard_normal(len(x))
+    x = 0.6 * x / np.max(np.abs(x))
+    return x.astype(np.float32), truth

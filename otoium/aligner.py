@@ -33,7 +33,7 @@ class Seg:
     e_ms: float = None
 
 
-def build_tokens(morae, T, hop_ms, cfg):
+def build_tokens(morae, T, hop_ms, cfg, model=None, rate=1.0):
     toks = []
 
     def mk(unit, mora, kind, edge=False):
@@ -46,11 +46,16 @@ def build_tokens(morae, T, hop_ms, cfg):
             if not edge:
                 lp[1:] = -cfg.pause_penalty
         else:
+            mean_ms, sigma = dmean_ms, DUR_SIGMA.get(c, 0.7)
+            if model is not None and unit in model.dur_mu:
+                mean_ms = float(np.exp(model.dur_mu[unit])) * rate
+                sigma = model.dur_sd[unit]
+                dmax_ms = max(dmax_ms, model.dur_max[unit] * rate)
             dmin = max(1, int(math.ceil(dmin_ms / hop_ms)))
             dmax = min(T, int(math.ceil(dmax_ms / hop_ms)))
             d = np.arange(dmax + 1, dtype=float)
             d[0] = 1
-            lp = -0.5 * cfg.duration_weight * (np.log(d * hop_ms / dmean_ms) / DUR_SIGMA.get(c, 0.7)) ** 2
+            lp = -0.5 * cfg.duration_weight * (np.log(d * hop_ms / mean_ms) / sigma) ** 2
         return Token(unit, mora, kind, dmin, dmax, lp)
 
     toks.append(mk("pau", -1, "pau", edge=True))
@@ -104,9 +109,9 @@ def viterbi(LL, idx, toks, bnd, boundary_weight):
     return segs, float(dp[N, T])
 
 
-def align(model, F, morae, cfg, LL=None):
+def align(model, F, morae, cfg, LL=None, rate=1.0):
     if LL is None:
         LL = model.loglik(F)
-    toks = build_tokens(morae, F.T, cfg.hop_ms, cfg)
+    toks = build_tokens(morae, F.T, cfg.hop_ms, cfg, model, rate)
     segs, score = viterbi(LL, model.idx, toks, F.bnd, cfg.boundary_weight)
     return segs, score, LL

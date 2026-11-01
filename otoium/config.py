@@ -15,10 +15,20 @@ class Config:
     # ---- 解析 ----
     hop_ms: float = 5.0
     win_ms: float = 25.0
-    accuracy: str = "high"      # fast / high / max (学習回数・自動調整・救済の強さ)
-    train_iters: int = 0        # 0: accuracy の既定値
+    accuracy: str = "high"      # fast / high / max / ultra / custom
+    # --- カスタム値 (0 / -1 は精度プリセットの値を使う。custom 以外でも指定すれば上書き) ---
+    train_iters: int = 0        # ガウスモデルの学習回数
+    tune_rounds: int = -1       # 自動調整の周回数 (0 で無効)
+    net_epochs: int = 0         # ニューラルモデルの学習エポック
+    net_ensemble: int = 0       # ニューラルモデルのアンサンブル数
+    adapt_rounds: int = -1      # 録音ごとの適応の反復 (0 で無効)
+    post_iters: int = -1        # 自動調整後の再学習回数
+    confident_rounds: int = -1  # 高信頼ファイルだけでの再学習の周回数
     auto_tune: bool = None      # None: accuracy の既定値
     rescue: bool = None
+    use_net: bool = None        # ニューラル音響モデル (None: プリセット)
+    nn_weight: float = 2.0
+    adapt: bool = None          # ファイル単位の適応 (None: プリセット)
     refine: bool = True         # 1ms 精度の境界微調整
     delta_weight: float = 0.25
     mfcc_weight: float = 0.35
@@ -35,6 +45,9 @@ class Config:
     # ---- 検証 ----
     thr_contrast: float = 1.5
     thr_bnd: float = 0.6
+    cons_review: float = 0.34
+    cons_warn: float = 0.6
+    auto_thresholds: bool = True   # しきい値を録音データから自動校正
     ok_agree: float = 0.55
     fail_agree: float = 0.25
     # ---- 動作 ----
@@ -59,7 +72,41 @@ class Config:
 
 
 PRESETS = {
-    "fast": dict(iters=3, tune=False, rounds=0, rescue=False),
-    "high": dict(iters=5, tune=True, rounds=1, rescue=True),
-    "max": dict(iters=8, tune=True, rounds=2, rescue=True),
+    "fast":  dict(iters=3,  rounds=0, rescue=False, net_epochs=0,  ens=0, adapt_rounds=0, post=0, conf=0),
+    "high":  dict(iters=5,  rounds=1, rescue=True,  net_epochs=10, ens=1, adapt_rounds=1, post=2, conf=0),
+    "max":   dict(iters=8,  rounds=2, rescue=True,  net_epochs=14, ens=2, adapt_rounds=2, post=3, conf=1),
+    "ultra": dict(iters=12, rounds=3, rescue=True,  net_epochs=20, ens=3, adapt_rounds=3, post=4, conf=2),
 }
+ACCURACY_MODES = ["fast", "high", "max", "ultra", "custom"]
+
+
+def resolve(cfg):
+    """精度プリセット + カスタム値 + 個別スイッチ → 実際に使う設定値"""
+    pr = dict(PRESETS["high" if cfg.accuracy == "custom" else cfg.accuracy])
+    if cfg.train_iters > 0:
+        pr["iters"] = cfg.train_iters
+    if cfg.tune_rounds >= 0:
+        pr["rounds"] = cfg.tune_rounds
+    if cfg.net_epochs > 0:
+        pr["net_epochs"] = cfg.net_epochs
+    if cfg.net_ensemble > 0:
+        pr["ens"] = cfg.net_ensemble
+    if cfg.adapt_rounds >= 0:
+        pr["adapt_rounds"] = cfg.adapt_rounds
+    if cfg.post_iters >= 0:
+        pr["post"] = cfg.post_iters
+    if cfg.confident_rounds >= 0:
+        pr["conf"] = cfg.confident_rounds
+    pr["tune"] = pr["rounds"] > 0 if cfg.auto_tune is None else bool(cfg.auto_tune) and max(pr["rounds"], 1) > 0
+    if cfg.auto_tune and pr["rounds"] == 0:
+        pr["rounds"] = 1
+    pr["net"] = (pr["net_epochs"] > 0 and pr["ens"] > 0) if cfg.use_net is None else bool(cfg.use_net)
+    if pr["net"]:
+        pr["net_epochs"] = pr["net_epochs"] or 10
+        pr["ens"] = pr["ens"] or 1
+    pr["adapt"] = pr["adapt_rounds"] > 0 if cfg.adapt is None else bool(cfg.adapt)
+    if pr["adapt"] and pr["adapt_rounds"] == 0:
+        pr["adapt_rounds"] = 1
+    if cfg.rescue is not None:
+        pr["rescue"] = bool(cfg.rescue)
+    return pr

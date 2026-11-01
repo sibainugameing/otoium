@@ -1,4 +1,5 @@
-"""自動調整: 正解なしで検証スコアを最大化するように解析パラメータを座標降下で探索"""
+"""自動調整: 検証スコアを最大化するように「整列側」のパラメータを座標降下で探索。
+検証側 (free_switch_penalty など) は自己採点になるため調整対象にしない。"""
 from dataclasses import replace
 import numpy as np
 from .aligner import AlignmentError
@@ -8,9 +9,14 @@ GRID = {
     "boundary_weight": [2.0, 4.0, 8.0],
     "duration_weight": [0.25, 0.5, 1.0],
     "pause_penalty": [1.0, 2.0, 4.0],
-    "free_switch_penalty": [6.0, 10.0, 16.0],
-    "mfcc_weight": None,   # 音響モデル側の重み (後述)
 }
+NN_GRID = [0.0, 1.0, 2.0, 4.0]
+FINE_GRID = {
+    "boundary_weight": [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0],
+    "duration_weight": [0.15, 0.25, 0.4, 0.5, 0.7, 1.0, 1.5],
+    "pause_penalty": [0.5, 1.0, 2.0, 3.0, 4.0, 6.0],
+}
+FINE_NN = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
 def _objective(model, subset, cfg):
@@ -31,9 +37,23 @@ def autotune(model, jobs, cfg, log, rounds=1, max_files=16):
     subset = [(j, model.loglik(j.F, j.X)) for j in sel]
     best, best_s = cfg, _objective(model, subset, cfg)
     log(f"    自動調整: 初期スコア {best_s:.3f} ({len(sel)} ファイルで評価)")
+    grid, nn_grid = (FINE_GRID, FINE_NN) if rounds >= 3 else (GRID, NN_GRID)
     for r in range(rounds):
         changed = False
-        for key, vals in GRID.items():
+        if model.net is not None:
+            for v in nn_grid:
+                if v == model.nn_weight:
+                    continue
+                old = model.nn_weight
+                model.nn_weight = v
+                sub2 = [(j, model.loglik(j.F, j.X)) for j in sel]
+                s = _objective(model, sub2, best)
+                if s > best_s + 1e-4:
+                    best_s, subset, changed = s, sub2, True
+                    log(f"    自動調整: nn_weight={v} → {s:.3f}")
+                else:
+                    model.nn_weight = old
+        for key, vals in grid.items():
             if vals is None:
                 continue
             for v in vals:

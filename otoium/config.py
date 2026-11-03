@@ -71,6 +71,7 @@ class Config:
     converge_score: float = 0.002   # 得点の伸びがこの値以下なら「伸びない」
     partial_repair: bool = True     # 失敗したモーラの区間だけを再整列
     write_failed: bool = False      # 失敗・保留でも oto.ini に書き込む (一覧は otoium_forced.txt)
+    skip_unknown_chars: bool = False  # 台本/ファイル名の未対応文字を無視して解析 (無視した文字は注記)
     recheck_rounds: int = 3         # 失敗箇所の再検査の最大回数 (0 で無効)
     track_metrics: bool = True      # 学習の得点を記録・表示
 

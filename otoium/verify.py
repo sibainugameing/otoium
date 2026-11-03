@@ -36,7 +36,7 @@ def accepted_groups(u):
         acc |= {"u", "o"}       # 残響下の子音の鼻音は低い母音と区別しにくい
     if u in ("frH", "frHY", "frF"):
         acc |= {"SIL"}
-    if u in ("frZ", "frJ", "clv"):
+    if u in ("frZ", "frJ", "frV", "clv"):
         acc |= {"N", "CL"}
     return acc
 
@@ -76,6 +76,7 @@ class MoraTiming:
     vowel_end: float
     cons_end_vc: Optional[float]
     gap_before: float
+    devoiced: bool = False
     v_frames: tuple = (0, 0)
     c_frames: tuple = (0, 0)
     agree_v: float = 1.0
@@ -104,6 +105,24 @@ def boundary_conf(LL, bnd, idx, prev, seg, cfg):
     return float(np.nan_to_num(conf, nan=0.0, posinf=1e3, neginf=-1e3))
 
 
+def check_timings(timings, dur_ms):
+    """時間情報の整合性: 有限・録音長内・単調増加・モーラ間で逆転しない。不正なら ValueError"""
+    prev_end = 0.0
+    for t in timings:
+        pts = [t.cons_start, t.vowel_start, t.vowel_end]
+        if not all(np.isfinite(pts)):
+            raise ValueError(f"モーラ {t.index + 1} の時刻が数値として不正です")
+        if not (0.0 <= t.cons_start <= t.vowel_start <= t.vowel_end <= dur_ms + 1e-6):
+            raise ValueError(f"モーラ {t.index + 1} の境界が不整合です (子音開始 {t.cons_start:.1f} / 母音開始 "
+                             f"{t.vowel_start:.1f} / 母音終了 {t.vowel_end:.1f} / 録音長 {dur_ms:.1f} ms)")
+        if t.cons_start < prev_end - 1.0:
+            raise ValueError(f"モーラ {t.index + 1} が前のモーラと重なっています")
+        for u, a, b in t.segs:
+            if not (np.isfinite(a) and np.isfinite(b)) or b < a - 1e-6:
+                raise ValueError(f"モーラ {t.index + 1} の音素 {u} の区間が不正です")
+        prev_end = t.vowel_end
+
+
 def build_timings(segs, morae, hop_ms, dur_ms):
     """Seg 列 → MoraTiming 列 (ms)"""
     def ms(f):
@@ -130,7 +149,21 @@ def build_timings(segs, morae, hop_ms, dur_ms):
                        v_frames=(ss[-1].s, ss[-1].e), c_frames=(ss[0].s, ss[-1].s))
         out.append(t)
         last_end = ve
+    check_timings(out, dur_ms)
     return out
+
+
+_UNVOICED_C = {"cl", "brK", "brT", "brP", "frS", "frSH", "frH", "frHY", "frF", "frTS", "frCH"}
+
+
+def _maybe_devoiced(F, vseg, cons_units):
+    """無声化母音 (し・す・き・く 等で i/u が声帯振動なしになる) の可能性: 直前が無声子音、有声度が低いが音は存在する"""
+    if vseg.unit not in ("i", "u") or not cons_units or cons_units[-1] not in _UNVOICED_C:
+        return False
+    seg = F.cls[vseg.s:vseg.e]
+    if len(seg) < 3:
+        return False
+    return float(np.mean(seg[:, 1])) < 0.35 and float(np.median(seg[:, 0])) > -3.5
 
 
 def _mode(labels):
@@ -165,11 +198,19 @@ def assess(timings, segs, LL, F, model, labels, cfg):
         confs = [ss[0].bconf, vseg.bconf]
         t.bconf = float(min(confs))
         t.notes = []
+        dev = t.agree_v < cfg.ok_agree and _maybe_devoiced(F, vseg, [x.unit for x in cons])
+        t.devoiced = bool(dev)
         i0 = real.index(ss[0])
         if i0 > 0 and real[i0 - 1].unit == ss[0].unit == "NN":
             t.bconf = max(t.bconf, 1.0)
             t.notes.append("ん の連続は音響的に境界を特定できないため推定位置")
-        if t.agree_v < cfg.fail_agree:
+        if dev:
+            t.status = "WARN"
+            t.notes.append(f"無声化母音の可能性 (有声度 {float(np.mean(F.cls[vseg.s:vseg.e, 1])):.2f}): 母音の有声検証を免除")
+            if t.cons_agree < cfg.cons_review:
+                t.status = "REVIEW"
+                t.notes.append(f"子音が音響的に確認できない (一致率 {t.cons_agree:.2f})")
+        elif t.agree_v < cfg.fail_agree:
             t.status = "ERROR"
             t.notes.append(f"母音の独立認識が不一致 (期待 {vseg.unit} / 認識 {t.rec_vowel}, 一致率 {t.agree_v:.2f})")
         elif t.agree_v < cfg.ok_agree:
@@ -199,12 +240,12 @@ def assess(timings, segs, LL, F, model, labels, cfg):
             if cur in vn and run >= min_run:
                 nuclei += 1
             cur, run = x, 1
-    exp = 1 if only_n else max(1, sum(1 for t in timings if t.mora.vowel != "N"))
+    exp = 1 if only_n else max(1, sum(1 for t in timings if t.mora.vowel != "N" and not t.devoiced))
     ratio = nuclei / exp
     file_status = "OK"
-    mean_agree = float(np.mean([t.agree_v for t in timings]))
+    mean_agree = float(np.mean([1.0 if t.devoiced else t.agree_v for t in timings]))
     n_bad = sum(1 for t in timings if STATUS_RANK[t.status] >= 2)
-    if n_bad / len(timings) > 0.5:
+    if n_bad / len(timings) >= 0.4:
         file_status = "FAIL"
         notes.append(f"分割失敗: {len(timings)} モーラ中 {n_bad} モーラが音響検証に不合格 (台本と音声が一致しない可能性)")
     elif ratio < 0.5 or mean_agree < 0.35:

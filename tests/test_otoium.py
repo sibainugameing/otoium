@@ -344,6 +344,76 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
             self.assertEqual([a[0] for a in oto["_なにぬねの.wav"]], [e_bad.alias])
             self.assertNotIn(e_good.alias, [a[0] for a in oto["_あかさたな.wav"]])
 
+    def test_kana_extended_and_romaji_variants(self):
+        g = lambda t: [(m.cons, m.vowel) for m in parse_text(t)]
+        self.assertEqual(g("_んふぉんヴぃヴぃり"), [("", "N"), ("f", "o"), ("", "N"), ("v", "i"), ("v", "i"), ("r", "i")])
+        self.assertEqual(g("ヴ_ヴぁヴぇヴぉヴゃ"), [("v", "u"), ("v", "a"), ("v", "e"), ("v", "o"), ("vy", "a")])
+        self.assertEqual(g("sya tya kka si ti tu hu zi"), [("sh", "a"), ("ch", "a"), ("k", "a"), ("sh", "i"), ("ch", "i"),
+                                                           ("ts", "u"), ("f", "u"), ("j", "i")])
+        self.assertEqual(g("ka-n'a"), [("k", "a"), ("", "N"), ("", "a")])
+        self.assertEqual(g("くゎ"), [("kw", "a")])
+        self.assertEqual(g("va vi ve vo vu"), [("v", v) for v in "aieou"])
+        sk = []
+        self.assertEqual(len(parse_text("_あ☆か?", True, sk)), 2)
+        self.assertEqual(sk, ["☆", "?"])
+        with self.assertRaises(Exception):
+            parse_text("_あ☆か")
+
+    def test_v_sound_file_is_aligned(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d, BANK + ["_んふぉんヴぃヴぃり"])
+            p, rep = run(d, mode="vcv")
+            f = [f for f in rep["files"] if f["file"].startswith("_んふぉん")][0]
+            self.assertNotEqual(f["status"], "FAIL", f["notes"])
+            self.assertEqual([a[0] for a in read_oto(d)["_んふぉんヴぃヴぃり.wav"]],
+                             ["ん", "ん ふぉ", "ふぉ ん", "ん ヴぃ", "ヴぃ ヴぃ", "ヴぃ り"])
+
+    def test_devoiced_vowels_are_not_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            for i, t in enumerate(["_きしすくち", "_ひしふきち"]):
+                x, _ = render(t, seed=40 + i, devoice=True)
+                write_wav(Path(d) / f"{t}.wav", x)
+            p, rep = run(d, mode="vcv")
+            for t in ["_きしすくち", "_ひしふきち"]:
+                f = [f for f in rep["files"] if f["file"] == f"{t}.wav"][0]
+                self.assertNotEqual(f["status"], "FAIL", f["notes"])
+                self.assertGreaterEqual(len(read_oto(d)[f"{t}.wav"]), 4)
+
+    def test_devoiced_vowel_detector(self):
+        from types import SimpleNamespace as NS
+        from otoium.verify import _maybe_devoiced
+        mk = lambda voi, e: NS(cls=np.tile(np.array([[e, voi, 0.1, 0.1, 0.3, 0.2, 0.5, 0.5]]), (10, 1)))
+        seg = lambda u: NS(unit=u, s=0, e=10)
+        self.assertTrue(_maybe_devoiced(mk(0.1, -1.0), seg("i"), ["cl", "brK"]))       # 無声子音の後・有声度低・音あり
+        self.assertFalse(_maybe_devoiced(mk(0.9, -1.0), seg("i"), ["cl", "brK"]))      # 有声 → 通常の母音
+        self.assertFalse(_maybe_devoiced(mk(0.1, -5.0), seg("i"), ["cl", "brK"]))      # 無音 → 母音がない
+        self.assertFalse(_maybe_devoiced(mk(0.1, -1.0), seg("a"), ["cl", "brK"]))      # a は対象外
+        self.assertFalse(_maybe_devoiced(mk(0.1, -1.0), seg("i"), ["clv", "brG"]))     # 有声子音の後は対象外
+
+    def test_timing_consistency_checks(self):
+        from otoium.verify import check_timings, MoraTiming
+        from otoium.kana import parse_text as pt
+        m = pt("か")[0]
+        mk = lambda i, a, b, c: MoraTiming(i, m, [("a", b, c)], a, b, c, None, 0.0)
+        check_timings([mk(0, 10, 20, 30), mk(1, 30, 40, 50)], 100)
+        for bad in ([mk(0, 10, 5, 30)], [mk(0, 10, 20, 300)], [mk(0, 10, 20, 30), mk(1, 5, 40, 50)],
+                    [mk(0, float("nan"), 20, 30)]):
+            with self.assertRaises(ValueError):
+                check_timings(bad, 100)
+
+    def test_skip_unknown_chars_option(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d)
+            x, _ = render("_あかさ", seed=5)
+            write_wav(Path(d) / "_あか☆さ.wav", x)
+            p, rep = run(d, mode="vcv", accuracy="fast")
+            self.assertEqual([f for f in rep["files"] if "☆" in f["file"]][0]["status"], "FAIL")
+            p, rep = run(d, mode="vcv", accuracy="fast", skip_unknown_chars=True)
+            f = [f for f in rep["files"] if "☆" in f["file"]][0]
+            self.assertNotEqual(f["status"], "FAIL")
+            self.assertTrue(any("☆" in n for n in f["notes"]))
+
     def test_resolve_presets(self):
         from otoium.config import resolve
         self.assertFalse(resolve(Config(accuracy="fast"))["net"])

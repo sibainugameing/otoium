@@ -72,7 +72,7 @@ class AcousticModel:
             S = self.splice(X)
             lp = np.mean([n.logpost(S) - n.logprior for n in self.nets], axis=0)
             LL += self.nn_weight * np.clip(lp, -12.0, 12.0).T
-        return LL
+        return np.nan_to_num(LL, nan=-1e3, posinf=1e3, neginf=-1e3)
 
     @staticmethod
     def splice(X, k=3):

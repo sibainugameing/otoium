@@ -19,7 +19,7 @@ class Result:
 
 def file_score(timings, status):
     n = len(timings)
-    agree = np.mean([t.agree_v for t in timings])
+    agree = np.mean([1.0 if t.devoiced else t.agree_v for t in timings])
     bc = np.mean([min(t.bconf, 1.5) for t in timings])
     ca = np.mean([t.cons_agree for t in timings])
     bad = sum(1 for t in timings if STATUS_RANK[t.status] >= 2) / n

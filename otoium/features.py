@@ -114,6 +114,12 @@ def extract(x, sr, hop_ms=5.0, win_ms=25.0):
     idx = np.arange(T)
     dm = ((mfcc[np.minimum(idx + 2, T - 1)] - mfcc[np.maximum(idx - 2, 0)]) / 4.0).astype(np.float32)
     bnd = _boundary_evidence(mfcc, energy_db)
+    for name, arr in (("cls", cls), ("mfcc", mfcc), ("dmfcc", dm), ("bnd", bnd)):
+        bad = ~np.isfinite(arr)
+        if bad.any():
+            if bad.any(axis=1).mean() > 0.01 if arr.ndim == 2 else bad.mean() > 0.01:
+                raise ValueError(f"特徴量 {name} に NaN/Inf が多数含まれます (入力音声が不正)")
+            np.nan_to_num(arr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
     # 1ms 微細包絡
     xf = np.pad(x16, (0, max(0, 80 - len(x16))))
     fv = sliding_window_view(xf, 64)[::16]

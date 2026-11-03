@@ -9,8 +9,11 @@ FORM = {"a": (800, 1300, 2500), "i": (300, 2300, 3000), "u": (350, 1250, 2400),
 BW = (80, 110, 160)
 DUR = {"a": .22, "i": .22, "u": .22, "e": .22, "o": .22, "NN": .18, "nas": .07, "nas_m": .07, "nas_ny": .08,
        "frS": .10, "frSH": .11, "frTS": .08, "frCH": .09, "frH": .08, "frHY": .08, "frF": .08, "frZ": .08,
-       "frJ": .07, "cl": .05, "clv": .035, "brK": .03, "brT": .025, "brP": .02, "brG": .015, "brD": .015,
+       "frJ": .07, "frV": .08, "cl": .05, "clv": .035, "brK": .03, "brT": .025, "brP": .02, "brG": .015, "brD": .015,
        "brB": .015, "rf": .02, "gl_y": .04, "gl_w": .04}
+
+
+_UNVOICED = {"k", "s", "sh", "t", "ch", "ts", "h", "hy", "f", "p", "ky", "py"}
 
 
 def _res(x, f, bw):
@@ -28,6 +31,15 @@ def _voiced(dur, f0, formants, amp, rng):
         y = _res(y, f, bw)
     y = y / (np.max(np.abs(y)) + 1e-9)
     return amp * y + 0.003 * rng.standard_normal(n)
+
+
+def _whisper(dur, formants, amp, rng):
+    """無声化母音: 声帯振動なし (雑音励振) のフォルマント共鳴"""
+    n = int(dur * SR)
+    y = rng.standard_normal(n)
+    for f, bw in zip(formants, (150, 200, 250)):
+        y = _res(y, f, bw)
+    return amp * y / (np.max(np.abs(y)) + 1e-9)
 
 
 def _noise(dur, lo, hi, amp, rng):
@@ -53,7 +65,7 @@ def _unit(u, dur, nxt_v, f0, rng):
     if u in ("frH", "frHY", "frF"):
         y = _noise(dur, 300, 6000, 0.07, rng)
         return y
-    if u in ("frZ", "frJ"):
+    if u in ("frZ", "frJ", "frV"):
         return _voiced(dur, f0, (300, 1500, 2600), 0.25, rng) + _noise(dur, 4500, 7800, 0.08, rng)
     if u == "cl":
         return 0.002 * rng.standard_normal(n)
@@ -76,7 +88,7 @@ def _unit(u, dur, nxt_v, f0, rng):
     raise KeyError(u)
 
 
-def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR, tempo=1.0, blur=0.0, reverb=0.0, noise=0.0, jitter=0.0):
+def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR, tempo=1.0, blur=0.0, reverb=0.0, noise=0.0, jitter=0.0, devoice=False):
     """returns (audio float32, truth) truth=[(mora_idx, unit, start_s, end_s)]"""
     rng = np.random.default_rng(seed)
     morae = parse_text(text)
@@ -90,7 +102,10 @@ def render(text, seed=0, f0=125.0, lead=0.3, trail=0.3, sr_out=SR, tempo=1.0, bl
         nxt_v = m.vowel
         for u in us:
             dur = DUR[u] * tempo * (1 + 0.15 * rng.standard_normal() * 0.5)
-            y = _unit(u, dur, nxt_v, f0 * (1 + 0.04 * rng.standard_normal()), rng)
+            if devoice and u in ("i", "u") and u == m.vowel and m.cons in _UNVOICED:
+                y = _whisper(dur, FORM[u], 0.35, rng)
+            else:
+                y = _unit(u, dur, nxt_v, f0 * (1 + 0.04 * rng.standard_normal()), rng)
             k = min(int(0.004 * SR), len(y) // 3)
             if k > 0:
                 ramp = np.linspace(0, 1, k)

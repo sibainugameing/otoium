@@ -32,7 +32,7 @@ class MetricChart(tk.Canvas):
     """学習曲線 (得点の推移)。段階が変わる位置に点線とラベル、最良点に緑の丸を描く"""
 
     def __init__(self, master, title, better="up", **kw):
-        super().__init__(master, bg="#ffffff", highlightthickness=1, highlightbackground="#cccccc", **kw)
+        super().__init__(master, bg="#ffffff", highlightthickness=1, highlightbackground="#d9dde3", **kw)
         self.title, self.better = title, better
         self.vals, self.stages = [], []
         self.bind("<Configure>", lambda e: self.redraw())
@@ -94,7 +94,7 @@ class WaveView(tk.Canvas):
     """波形 + 音素区間 + モーラ + 選択エイリアスの oto マーカー。ホイールで拡大縮小、ドラッグで移動。"""
 
     def __init__(self, master, **kw):
-        super().__init__(master, bg="#ffffff", highlightthickness=1, highlightbackground="#bbbbbb", **kw)
+        super().__init__(master, bg="#ffffff", highlightthickness=1, highlightbackground="#d9dde3", **kw)
         self.job = None
         self.entry = None
         self.t0, self.t1 = 0.0, 1.0
@@ -212,13 +212,7 @@ class App(tk.Tk):
         self.title("otoium")
         self.geometry("1280x820")
         self.minsize(980, 640)
-        try:
-            ttk.Style(self).theme_use("clam")
-        except tk.TclError:
-            pass
-        st = ttk.Style(self)
-        st.configure("Treeview", rowheight=22)
-        st.configure("Accent.TButton", font=("", 10, "bold"))
+        self._apply_theme()
         self.q = queue.Queue()
         self.pipe = None
         self.thread = None
@@ -233,6 +227,47 @@ class App(tk.Tk):
         self._build_log()
         self.after(100, self._poll)
 
+    def _apply_theme(self):
+        """白基調のテーマ。ttk の clam をベースに全ウィジェットの配色を明示する"""
+        W, LINE, TXT, SUB, ACC, SEL, HEAD = "#ffffff", "#d9dde3", "#1f2933", "#6b7280", "#2b6cb0", "#dbeafe", "#f3f4f6"
+        self.configure(bg=W)
+        st = ttk.Style(self)
+        try:
+            st.theme_use("clam")
+        except tk.TclError:
+            pass
+        st.configure(".", background=W, foreground=TXT, fieldbackground=W, bordercolor=LINE, lightcolor=W, darkcolor=W,
+                     troughcolor=HEAD, focuscolor=ACC, selectbackground=SEL, selectforeground=TXT)
+        for n in ("TFrame", "TLabel", "TCheckbutton", "TRadiobutton", "TPanedwindow"):
+            st.configure(n, background=W, foreground=TXT)
+        st.configure("TLabelframe", background=W, bordercolor=LINE, relief="solid", borderwidth=1)
+        st.configure("TLabelframe.Label", background=W, foreground=ACC, font=("", 9, "bold"))
+        st.configure("TNotebook", background=W, bordercolor=LINE, tabmargins=(0, 4, 0, 0))
+        st.configure("TNotebook.Tab", background=HEAD, foreground=SUB, padding=(14, 6), bordercolor=LINE)
+        st.map("TNotebook.Tab", background=[("selected", W)], foreground=[("selected", ACC)])
+        st.configure("TButton", background=W, foreground=TXT, bordercolor=LINE, padding=(10, 4), relief="solid")
+        st.map("TButton", background=[("active", HEAD), ("disabled", HEAD)], foreground=[("disabled", "#9ca3af")])
+        st.configure("Accent.TButton", background=ACC, foreground="#ffffff", bordercolor=ACC, font=("", 10, "bold"))
+        st.map("Accent.TButton", background=[("active", "#2c5282"), ("disabled", "#bcd0e8")],
+               foreground=[("disabled", "#ffffff")])
+        for n in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(n, fieldbackground=W, background=W, foreground=TXT, bordercolor=LINE, padding=3)
+        st.map("TCombobox", fieldbackground=[("readonly", W)], foreground=[("readonly", TXT)])
+        st.map("TEntry", bordercolor=[("focus", ACC)])
+        st.configure("Treeview", background=W, fieldbackground=W, foreground=TXT, bordercolor=LINE, rowheight=24)
+        st.map("Treeview", background=[("selected", SEL)], foreground=[("selected", TXT)])
+        st.configure("Treeview.Heading", background=HEAD, foreground=TXT, bordercolor=LINE, relief="flat",
+                     font=("", 9, "bold"))
+        st.map("Treeview.Heading", background=[("active", LINE)])
+        st.configure("Horizontal.TProgressbar", background=ACC, troughcolor=HEAD, bordercolor=LINE)
+        st.configure("Vertical.TScrollbar", background=HEAD, troughcolor=W, bordercolor=LINE, arrowcolor=SUB)
+        st.configure("Horizontal.TScrollbar", background=HEAD, troughcolor=W, bordercolor=LINE, arrowcolor=SUB)
+        # ドロップダウンの一覧・テキストなど、ttk 管理外のウィジェット
+        self.option_add("*TCombobox*Listbox.background", W)
+        self.option_add("*TCombobox*Listbox.foreground", TXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", SEL)
+        self.option_add("*TCombobox*Listbox.selectForeground", TXT)
+
     # ---------------- 変数 ----------------
     def _build_vars(self):
         d = Config()
@@ -241,7 +276,7 @@ class App(tk.Tk):
         for k, v in str_vars.items():
             self.V[k] = tk.StringVar(value=v)
         self.V["jobs"] = tk.IntVar(value=1)
-        for k in ("add_tail", "strict", "dry_run", "merge", "textgrid", "export_labels", "write_failed"):
+        for k in ("add_tail", "strict", "dry_run", "merge", "textgrid", "export_labels", "write_failed", "skip_unknown_chars"):
             self.V[k] = tk.BooleanVar(value=False)
         for k in ("refine", "tune", "rescue", "net", "adapt", "auto_thresholds", "recursive", "backup", "dedupe", "cache", "partial_repair"):
             self.V[k] = tk.BooleanVar(value=True)
@@ -272,7 +307,7 @@ class App(tk.Tk):
             export_labels=v["export_labels"], alias_prefix=v["alias_prefix"], alias_suffix=v["alias_suffix"],
             jobs=max(1, int(v["jobs"] or 1)), recursive=v["recursive"], backup=v["backup"], dedupe=v["dedupe"],
             cache=v["cache"], recheck_rounds=int(v["recheck"]), write_failed=v["write_failed"],
-            partial_repair=v["partial_repair"])
+            partial_repair=v["partial_repair"], skip_unknown_chars=v["skip_unknown_chars"])
 
     # ---------------- 画面 ----------------
     def _build_top(self):
@@ -320,6 +355,7 @@ class App(tk.Tk):
         self._check(g1, "サブフォルダも処理", "recursive", 7, 0, 2)
         self._check(g1, "既存を .bak に退避", "backup", 7, 2, 2)
         self._check(g1, "重複エイリアスを整理", "dedupe", 8, 0, 2)
+        self._check(g1, "未対応文字を無視して解析", "skip_unknown_chars", 8, 2, 2)
         g2 = ttk.LabelFrame(tab, text="精度・自動調整", padding=8)
         g2.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
         self._combo(g2, "精度", "accuracy", ACCURACY_MODES, 0, 0)
@@ -333,7 +369,7 @@ class App(tk.Tk):
         self._check(g2, "しきい値の自動校正", "auto_thresholds", 6, 0, 4)
         self._check(g2, "特徴量キャッシュ", "cache", 7, 0, 4)
         ttk.Label(g2, text="(チェックを外すとその処理を無効化。精度プリセットで無効なものは有効になりません)",
-                  foreground="#666666", wraplength=360).grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 0))
+                  foreground="#6b7280", wraplength=360).grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Label(g2, textvariable=self.V["mode_info"], foreground="#2b6cb0", wraplength=360, justify="left").grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Label(g2, text="失敗箇所の再検査 (最大回数)").grid(row=10, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -384,7 +420,7 @@ class App(tk.Tk):
         ttk.Label(head, textvariable=self.V["score_text"], font=("", 16, "bold")).pack(side="left")
         ttk.Label(head, text="   学習の各段階で、固定のファイル集合に対する検証スコア(母音一致・境界確信度・子音確認・不合格率)を測った値。"
                              "高いほど良い。最高点のモデルを保存し、悪化したら戻します。",
-                  foreground="#666666", wraplength=720).pack(side="left", padx=8)
+                  foreground="#6b7280", wraplength=720).pack(side="left", padx=8)
         grid = ttk.Frame(tab)
         grid.pack(fill="both", expand=True, pady=(8, 0))
         self.charts = {}
@@ -440,7 +476,7 @@ class App(tk.Tk):
         b.pack(side="left", padx=(6, 0))
         self.act_buttons.append(b)
         ttk.Label(bar, text="(エイリアス行のダブルクリックで、そのエイリアスを書く/書かないを個別に切替)",
-                  foreground="#777777").pack(side="left", padx=10)
+                  foreground="#6b7280").pack(side="left", padx=10)
         pw = ttk.PanedWindow(tab, orient="horizontal")
         pw.pack(fill="both", expand=True)
         left = ttk.Frame(pw)
@@ -472,7 +508,7 @@ class App(tk.Tk):
         self.wave = WaveView(right, height=260)
         self.wave.pack(fill="x")
         ttk.Label(right, text="ホイール: 拡大縮小 / ドラッグ: 移動 / ダブルクリック: 全体表示 / エイリアス行を選ぶと oto マーカーを表示",
-                  foreground="#777777").pack(anchor="w", pady=(2, 4))
+                  foreground="#6b7280").pack(anchor="w", pady=(2, 4))
         nb2 = ttk.Notebook(right)
         nb2.pack(fill="both", expand=True)
         f_al = ttk.Frame(nb2)
@@ -506,7 +542,9 @@ class App(tk.Tk):
     def _build_log(self):
         tab = ttk.Frame(self.nb, padding=6)
         self.nb.add(tab, text="ログ")
-        self.log = tk.Text(tab, wrap="word", state="disabled")
+        self.log = tk.Text(tab, wrap="word", state="disabled", bg="#ffffff", fg="#1f2933", relief="flat",
+                           highlightthickness=1, highlightbackground="#d9dde3", highlightcolor="#2b6cb0",
+                           insertbackground="#1f2933", padx=8, pady=6)
         sb = ttk.Scrollbar(tab, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         self.log.pack(side="left", fill="both", expand=True)

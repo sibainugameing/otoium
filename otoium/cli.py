@@ -36,6 +36,7 @@ def build_parser():
     p.add_argument("--converge-shift", type=float, default=0.03, help="境界の平均変化がこの値(フレーム)未満で「動かない」")
     p.add_argument("--no-partial-repair", action="store_true", help="失敗モーラ区間だけのやり直しを無効化")
     p.add_argument("--write-failed", action="store_true", help="失敗・保留も oto.ini に書き込む (一覧は otoium_forced.txt)")
+    p.add_argument("--skip-unknown", action="store_true", help="台本・ファイル名の未対応文字を無視して解析")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--merge", action="store_true", help="既存 oto.ini の未処理ファイル行を残す")
     p.add_argument("--prefix", default="", help="エイリアス接頭辞")
@@ -67,7 +68,7 @@ def main(argv=None):
                  confident_rounds=a.confident_rounds, accuracy=a.accuracy, auto_tune=False if a.no_tune else None,
                  rescue=False if a.no_rescue else None, refine=not a.no_refine, use_net=False if a.no_net else None,
                  adapt=False if a.no_adapt else None, auto_thresholds=not a.no_auto_thresholds, jobs=a.jobs, cache=not a.no_cache,
-                 merge=a.merge, patience=a.patience, converge_shift=a.converge_shift,
+                 merge=a.merge, skip_unknown_chars=a.skip_unknown, patience=a.patience, converge_shift=a.converge_shift,
                  partial_repair=not a.no_partial_repair, write_failed=a.write_failed, recheck_rounds=a.recheck_rounds, alias_prefix=a.prefix, alias_suffix=a.suffix, textgrid=a.textgrid, model_path=a.model, strict=a.strict,
                  dry_run=a.dry_run, backup=not a.no_backup, recursive=not a.no_recursive, dedupe=not a.no_dedupe,
                  export_labels=a.labels)

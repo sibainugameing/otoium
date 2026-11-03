@@ -248,7 +248,8 @@ class Pipeline:
         if self.cfg.track_metrics and self._best_model is not None and not cfg.model_path:
             cur = self._eval_score()
             self.track.add("score", cur, "学習終了", log=True)
-            if self._best_score > cur + 0.003:
+            same = len(self._best_model.nets) == len(self.model.nets)     # NN 構成が違うチェックポイントには戻さない
+            if same and self._best_score > cur + 0.003:
                 self.model = self._best_model
                 self.log(f"    得点が最高だったチェックポイント (スコア {self._best_score:.3f}) に戻しました")
         if self.cfg.auto_thresholds:
@@ -284,7 +285,10 @@ class Pipeline:
             self.jobs.append(job)
             try:
                 job.text = script.get(p.name) or script.get(p.stem) or p.stem
-                job.morae = parse_text(job.text)
+                skipped = []
+                job.morae = parse_text(job.text, cfg.skip_unknown_chars, skipped)
+                if skipped:
+                    job.notes.append(f"未対応文字を無視しました: {''.join(skipped)}")
                 todo.append(job)
             except (TextParseError, KeyError) as ex:
                 job.fail(f"{type(ex).__name__}: {ex}")
@@ -748,7 +752,8 @@ class Pipeline:
                     "recognized_vowel": t.rec_vowel, "recognized_cons": t.rec_cons,
                     "vowel_agreement": round(t.agree_v, 3), "consonant_agreement": round(t.cons_agree, 3),
                     "boundary_conf": round(t.bconf, 3), "status": t.status, "notes": t.notes} for t in j.timings],
-                "aliases": [{"alias": e.alias, "kind": e.kind, "status": e.status, "line": format_entry(e),
+                "aliases": [{"alias": e.alias, "kind": e.kind, "status": e.status, "confidence": round(e.quality, 3),
+                             "valid": e.valid, "line": format_entry(e),
                              "notes": e.notes} for e in j.entries],
             })
         n_fail = sum(1 for j in self.jobs if j.status == "FAIL")

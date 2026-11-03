@@ -31,7 +31,7 @@ UNIT_CLASS = {
     "a": "V", "i": "V", "u": "V", "e": "V", "o": "V", "NN": "NN",
     "nas": "N", "nas_m": "N", "nas_ny": "N",
     "frS": "S", "frSH": "S", "frTS": "S", "frCH": "S",
-    "frH": "H", "frHY": "H", "frF": "H", "frZ": "Z", "frJ": "Z",
+    "frH": "H", "frHY": "H", "frF": "H", "frZ": "Z", "frJ": "Z", "frV": "Z",
     "cl": "CL", "clv": "CLV",
     "brK": "BR", "brT": "BR", "brP": "BR", "brG": "BRV", "brD": "BRV", "brB": "BRV",
     "rf": "RF", "gl_y": "GL", "gl_w": "GL", "pau": "PAU",
@@ -42,7 +42,7 @@ _CU = {
     "": [], "k": ["cl", "brK"], "g": ["clv", "brG"], "t": ["cl", "brT"], "d": ["clv", "brD"],
     "p": ["cl", "brP"], "b": ["clv", "brB"], "ch": ["cl", "frCH"], "ts": ["cl", "frTS"],
     "s": ["frS"], "sh": ["frSH"], "h": ["frH"], "hy": ["frHY"], "f": ["frF"],
-    "z": ["frZ"], "j": ["frJ"], "n": ["nas"], "m": ["nas_m"], "ny": ["nas_ny"],
+    "z": ["frZ"], "j": ["frJ"], "v": ["frV"], "n": ["nas"], "m": ["nas_m"], "ny": ["nas_ny"],
     "r": ["rf"], "y": ["gl_y"], "w": ["gl_w"],
 }
 

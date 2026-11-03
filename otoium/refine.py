@@ -45,3 +45,7 @@ def refine(segs, F, cfg):
         real[i].s_ms = max(real[i].s_ms, real[i - 1].s_ms + 1.0)
     for i in range(len(real) - 1):
         real[i].e_ms = real[i + 1].s_ms
+    lim = F.dur_s * 1000.0
+    for g in real:                       # 微調整後の整合性: 録音長内・開始<=終了
+        g.s_ms = min(max(g.s_ms, 0.0), lim)
+        g.e_ms = min(max(g.e_ms, g.s_ms), lim)

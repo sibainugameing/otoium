@@ -72,6 +72,16 @@ class Config:
     partial_repair: bool = True     # 失敗したモーラの区間だけを再整列
     write_failed: bool = False      # 失敗・保留でも oto.ini に書き込む (一覧は otoium_forced.txt)
     skip_unknown_chars: bool = False  # 台本/ファイル名の未対応文字を無視して解析 (無視した文字は注記)
+    result_json: bool = False         # 詳細な実行結果を JSON で書き出す
+    result_json_path: str = ""        # 空: <フォルダ>/otoium_result.json
+    result_json_detail: str = "full"  # summary / standard / full
+    allow_devoiced: bool = True       # 無声子音の後の i/u を無声化母音として整列してよい
+    devoiced_penalty: float = 3.0     # 無声化母音を選ぶときの罰則 (小さいほど選ばれやすい)
+    cut_dip_db: float = 15.0          # 母音が連続する箇所のエネルギーの谷がこの dB 以上なら「声が途切れている」と警告 (0 で無効)
+    min_dur_ratio: float = 0.0        # 母音・鼻音の最短長 = 学習済み平均長 × この値 (0 で無効。整列の潰れ防止)
+    dv_penalty: float = 3.0           # 独立認識で「無声化母音」と判定するときの罰則 (誤って息の子音を奪わないため)
+    guarded_updates: bool = True      # 学習の更新で得点が最高点より下がるなら、減衰した更新→更新なし の順に試す (学習で悪化しない)
+    accept_tolerance: float = 0.003   # 最高点からこの幅までの低下は許容 (累積しない: 常に最高点と比べる)
     recheck_rounds: int = 3         # 失敗箇所の再検査の最大回数 (0 で無効)
     track_metrics: bool = True      # 学習の得点を記録・表示
 

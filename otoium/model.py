@@ -19,8 +19,9 @@ class AcousticModel:
             mean, std = CLASS_PRIOR[UNIT_CLASS[u]][:2]
             self.prior_mu[i, :N_CLS] = mean
             self.prior_var[i, :N_CLS] = np.square(std)
-            if u in VOWEL_F:
-                self.prior_mu[i, 6:8] = VOWEL_F[u]
+            base = u[:-3] if u.endswith("_dv") else u
+            if base in VOWEL_F:
+                self.prior_mu[i, 6:8] = VOWEL_F[base]
                 self.prior_var[i, 6:8] = 0.12 ** 2
         self.mu = self.prior_mu.copy()
         self.var = self.prior_var.copy()
@@ -114,6 +115,21 @@ class AcousticModel:
                                   lr=2e-3 if fresh else 5e-4, reset_norm=fresh, seed=seed + k,
                                   callback=(lambda ep, l, a, k=k: callback(k, ep, l, a)) if callback else None))
         return float(np.mean(losses))
+
+    def blend(self, other, alpha):
+        """self から other へ alpha (0〜1) だけ近づけたモデルを返す (更新の減衰)。NN は同じ構成のときだけ重みを混ぜる"""
+        m = copy.deepcopy(self)
+        m.mu = (1 - alpha) * self.mu + alpha * other.mu
+        m.var = (1 - alpha) * self.var + alpha * other.var
+        for u in self.units:
+            m.dur_mu[u] = (1 - alpha) * self.dur_mu[u] + alpha * other.dur_mu[u]
+            m.dur_sd[u] = (1 - alpha) * self.dur_sd[u] + alpha * other.dur_sd[u]
+            m.dur_max[u] = (1 - alpha) * self.dur_max[u] + alpha * other.dur_max[u]
+        if self.nets and len(self.nets) == len(other.nets):
+            for n, a, b in zip(m.nets, self.nets, other.nets):
+                n.W = [(1 - alpha) * x + alpha * y for x, y in zip(a.W, b.W)]
+                n.b = [(1 - alpha) * x + alpha * y for x, y in zip(a.b, b.b)]
+        return m
 
     def update_durations(self, items, tau=5.0):
         """整列結果から音素ごとの時間長分布を MAP 推定 (ms)。話者の発話速度に適応する"""

@@ -13,7 +13,7 @@ from .features import extract, SilentAudioError, Features
 from .model import AcousticModel
 from .aligner import align, align_region, AlignmentError
 from .kana import parse_text, TextParseError
-from .verify import STATUS_RANK
+from .verify import STATUS_RANK, label_runs
 from .evaluate import evaluate, evaluate_segs
 from .metrics import Tracker
 from .tune import autotune
@@ -22,6 +22,9 @@ from .aliases import make_entries
 from .oto import write_oto, format_entry, read_lines
 from .export import write_labels, write_textgrid
 
+# モーラ長が潰れた箇所用: 時間長の重みを強め、母音・鼻音の最短長を学習済み平均長の一定割合に引き上げる
+TEMPO_VARIANTS = [dict(duration_weight=3.0, min_dur_ratio=0.3), dict(duration_weight=6.0, min_dur_ratio=0.4),
+                  dict(duration_weight=10.0, min_dur_ratio=0.5)]
 RESCUE_EXTRA = [dict(boundary_weight=12.0, duration_weight=1.5), dict(pause_penalty=0.1, boundary_weight=2.0),
                 dict(duration_weight=0.1)]
 RESCUE_VARIANTS = [
@@ -51,6 +54,7 @@ class FileJob:
         self.nuclei = 0
         self.score = 0.0
         self.rechecks = 0
+        self.decoded_runs = []
 
     def fail(self, msg):
         self.status = "FAIL"
@@ -143,9 +147,14 @@ def _load_one(args):
 class Pipeline:
     def __init__(self, cfg, log=print, progress=None, on_metric=None):
         self.cfg = cfg
-        self.track = Tracker(on_metric, log)
+        self.cfg_initial = cfg
+        self.logbuf, self._user_log = [], log
+        self.stage_seconds, self._t_mark = {}, time.time()
+        self.root = None
+        self.log = self._log
+        self.track = Tracker(on_metric, self._log)
         self._best_score, self._best_model, self._eval_set = -1e9, None, None
-        self.log = log
+        self._best = {}          # NN 本数 -> (最高得点, モデル): 構成ごとに最良を保持する
         self.progress = progress or (lambda frac, msg="": None)
         self.jobs = []
         self.model = None
@@ -194,7 +203,27 @@ class Pipeline:
                                strict=self.cfg.strict if strict is None else strict)
         self._emit(self.root, write=True)
         self._report(self.root, self.report.get("seconds", 0.0) if self.report else 0.0, write=True)
+        if self.cfg.result_json:
+            self.export_json()
         return self.report
+
+    def _log(self, msg):
+        self.logbuf.append(msg)
+        self._user_log(msg)
+
+    def _mark(self, name):
+        now = time.time()
+        self.stage_seconds[name] = round(self.stage_seconds.get(name, 0.0) + now - self._t_mark, 2)
+        self._t_mark = now
+
+    def export_json(self, path=None, detail=None):
+        """詳細な実行結果を JSON で書き出す。path 省略時は設定、さらに省略時は <フォルダ>/otoium_result.json"""
+        from .resultjson import write_result
+        detail = detail or self.cfg.result_json_detail
+        path = Path(path or self.cfg.result_json_path or (self.root / "otoium_result.json"))
+        write_result(self, path, detail)
+        self.log(f"    詳細な実行結果 ({detail}) を JSON で出力: {path}")
+        return path
 
     def cancel(self):
         self.cancelled = True
@@ -207,6 +236,8 @@ class Pipeline:
     def run(self, root):
         cfg = self.cfg
         t0 = time.time()
+        self._t_mark = t0
+        self.cfg_initial = self.cfg
         root = Path(root)
         self.root = root
         if not root.is_dir():
@@ -218,6 +249,7 @@ class Pipeline:
         script = load_script(cfg.script_path)
         self.log(f"[1/6] {len(wavs)} 個の WAV を読み込み・特徴抽出中…")
         self._load(wavs, script, root)
+        self._mark("load")
         ok = [j for j in self.jobs if j.status != "FAIL"]
         if not ok:
             raise RuntimeError("解析可能なファイルがありません")
@@ -234,6 +266,7 @@ class Pipeline:
             self._train(ok, self.iters, 0.2, 0.45)
             if self.do_net:
                 self._train_net(ok)
+        self._mark("train")
         if self.do_tune:
             self.log("[3/6] 解析パラメータを自動調整中…")
             ok = [j for j in ok if j.status != "FAIL"]
@@ -248,30 +281,35 @@ class Pipeline:
         if self.cfg.track_metrics and self._best_model is not None and not cfg.model_path:
             cur = self._eval_score()
             self.track.add("score", cur, "学習終了", log=True)
-            same = len(self._best_model.nets) == len(self.model.nets)     # NN 構成が違うチェックポイントには戻さない
-            if same and self._best_score > cur + 0.003:
-                self.model = self._best_model
-                self.log(f"    得点が最高だったチェックポイント (スコア {self._best_score:.3f}) に戻しました")
+            if self._best_here() > cur + 0.003 and self._restore_best():
+                self.log(f"    得点が最高だったチェックポイント (スコア {self._best_here():.3f}) に戻しました")
         if self.cfg.auto_thresholds:
             ok = [j for j in self.jobs if j.status != "FAIL"]
             self.cfg = calibrate(self.model, ok, self.cfg, self.log)
+        self._mark("tune_calibrate")
         self.log("[4/6] 最終アライメント・独立検証・救済…")
         fin = [j for j in self.jobs if j.status != "FAIL"]
         for i, j in enumerate(fin):
             self._check()
             self._final(j)
             self.progress(0.62 + 0.28 * (i + 1) / len(fin), j.path.name)
+        self._mark("final_alignment")
         if fin:
             self.track.add("score", float(np.mean([j.score for j in fin if j.status != "FAIL"] or [0.0])), "最終解析", log=True)
         self.log("[5/6] 失敗箇所の再検査と oto.ini の生成…")
         self._recheck()
+        self._mark("recheck")
         self._emit(root)
+        self._mark("write")
         if not self.cfg.dry_run and self.track.history:
             self.track.save(root)
         if self.cfg.save_model and not self.cfg.dry_run and not self.cfg.model_path:
             self.model.save(root / "otoium_model.npz")
         self.log("[6/6] レポート作成中…")
         self._report(root, time.time() - t0)
+        self._mark("report")
+        if self.cfg.result_json:
+            self.export_json()
         self.progress(1.0, "完了")
         return self.report
 
@@ -341,25 +379,48 @@ class Pipeline:
                 w = [1.0 if s >= med - 3 * mad else 0.0 for s in scores]
                 w = [x * (0.5 + 0.5 * min(1.0, max(0.0, (s - (med - 3 * mad)) / (3 * mad)))) for x, s in zip(w, scores)]
                 items = [(X, sg, wt) for (X, sg), wt in zip(items, w) if wt > 0]
-            self.model.fit(items)
-            if self.model.net is not None:
-                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
+            def update(items=items):
+                self.model.fit(items)
+                if self.model.net is not None:
+                    self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
+
+            accepted, sc = self._guarded_update(update, f"{stage} {it + 1}/{iters}")
             conv = float(np.mean(shift)) if shift else None
             self.track.add("ll", float(np.mean(scores)), stage)
             if conv is not None:
                 self.track.add("shift", conv, stage)
-            sc = self._checkpoint(f"{stage} {it + 1}/{iters}")
             self.log(f"    {stage} {it + 1}/{iters}: {len(items)} ファイル使用" + (f", 境界変化 {conv:.2f} フレーム" if conv is not None else ""))
             self.progress(p0 + (p1 - p0) * (it + 1) / iters, "学習")
+            if not accepted:
+                self.log("    これ以上更新しても得点が上がらないため学習を終了")
+                break
+            if self.is_fixed_point(conv):
+                self.log("    境界が全く動かなくなった (不動点) ため学習を終了: 以降の反復は同じ結果になります")
+                break
             if patience > 0 and conv is not None:
                 # 「境界がほぼ動かない」かつ「得点が伸びない」が patience 回連続し、かつ予定回数の半分は回したときだけ終了
-                flat = sc is None or prev_sc is None or (sc - prev_sc) <= cfg.converge_score
-                stable = stable + 1 if (conv < cfg.converge_shift and flat) else 0
-                if stable >= patience and it + 1 >= max(2, (iters + 1) // 2):
+                stable = self.next_stable(stable, conv, sc, prev_sc, cfg)
+                if self.should_stop(stable, patience, it + 1, iters):
                     self.log(f"    収束 (境界変化 {conv:.3f} フレーム, 得点の伸び停止が {stable} 回連続) のため学習を終了")
                     break
             if sc is not None:
                 prev_sc = sc
+
+    @staticmethod
+    def is_fixed_point(conv):
+        """整列が前回と完全に同じ (境界の変化が 0): 次の反復は同じ入力から同じモデルを作るだけなので続ける意味がない"""
+        return conv is not None and conv < 1e-9
+
+    @staticmethod
+    def next_stable(stable, conv, sc, prev_sc, cfg):
+        """「境界がほぼ動かない」かつ「得点が伸びない」なら連続回数を +1、そうでなければ 0 に戻す"""
+        flat = sc is None or prev_sc is None or (sc - prev_sc) <= cfg.converge_score
+        return stable + 1 if (conv < cfg.converge_shift and flat) else 0
+
+    @staticmethod
+    def should_stop(stable, patience, done, iters):
+        """patience 回連続で安定し、かつ予定回数の半分は回した (最低2回) ときだけ終了。patience 0 は終了しない"""
+        return patience > 0 and stable >= patience and done >= max(2, (iters + 1) // 2)
 
     def _eval_score(self):
         """学習の進行を測る得点: 固定のファイル集合に対する検証スコアの平均 (高いほど良い)"""
@@ -377,13 +438,55 @@ class Pipeline:
                 sc.append(-3.0)
         return float(np.mean(sc)) if sc else -3.0
 
+    def _restore_best(self):
+        """得点が最高だったチェックポイントに戻す。NN 構成が違うものには戻さない。
+        自動調整で決めた nn_weight は、戻した後も維持する (古いチェックポイントの値で上書きしない)"""
+        entry = self._best.get(len(self.model.nets))
+        if entry is None:
+            return False
+        keep_w = self.model.nn_weight
+        self.model = copy.deepcopy(entry[1])
+        self.model.nn_weight = keep_w
+        return True
+
+    def _best_here(self):
+        """現在のモデル構成 (NN 本数) での最高得点"""
+        e = self._best.get(len(self.model.nets))
+        return e[0] if e else -1e9
+
+    def _guarded_update(self, update_fn, stage):
+        """モデル更新を試し、得点が最高点より下がるなら、更新を半分 → 4分の1 に減衰して再試行、それでも下がるなら更新前に戻す。
+        自己教師あり学習で「更新するほど悪化する」ことを防ぐ。(採用したか, 得点) を返す"""
+        cfg = self.cfg
+        if not cfg.guarded_updates or not cfg.track_metrics:
+            update_fn()
+            return True, self._checkpoint(stage)
+        before, best_before = copy.deepcopy(self.model), self._best_here()
+        update_fn()
+        sc = self._checkpoint(stage)
+        if sc is None or best_before < -1e8 or sc >= best_before - cfg.accept_tolerance:
+            return True, sc
+        new = copy.deepcopy(self.model)
+        for alpha in (0.5, 0.25):
+            self.model = before.blend(new, alpha)
+            sc2 = self._checkpoint(f"{stage} 更新を{alpha:g}に減衰")
+            if sc2 >= best_before - cfg.accept_tolerance:
+                self.log(f"    更新で得点が下がるため、更新幅を {alpha:g} に減衰して採用 ({sc:.3f} → {sc2:.3f}, 最高 {best_before:.3f})")
+                return True, sc2
+        self.model = before
+        self.log(f"    更新で得点が最高点 {best_before:.3f} を下回る ({sc:.3f}) ため、この更新は採用せず元に戻しました")
+        return False, sc
+
     def _checkpoint(self, stage):
         if not self.cfg.track_metrics:
             return None
         sc = self._eval_score()
         self.track.add("score", sc, stage, log=True)
+        key = len(self.model.nets)
+        if key not in self._best or sc > self._best[key][0]:
+            self._best[key] = (sc, copy.deepcopy(self.model))
         if sc > self._best_score:
-            self._best_score, self._best_model = sc, copy.deepcopy(self.model)
+            self._best_score, self._best_model = sc, self._best[key][1]
         return sc
 
     def _train_net(self, ok):
@@ -402,7 +505,12 @@ class Pipeline:
         loss = self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
         self.model.nn_weight = self.cfg.nn_weight
         self.log(f"    ニューラルモデル学習完了 (アンサンブル {len(self.model.nets)}, loss {loss:.3f}, 重み {self.model.nn_weight})")
-        self._checkpoint("NN学習後")
+        sc = self._checkpoint("NN学習後")
+        b0 = self._best.get(0)
+        if sc is not None and self.cfg.guarded_updates and b0 and sc < b0[0] - self.cfg.accept_tolerance:
+            self.model.nets, self.model.nn_weight = [], 0.0          # NN を併用すると得点が下がる → 使わない
+            self.log(f"    NN の併用で得点が下がる ({sc:.3f} < {b0[0]:.3f}) ため NN は使用しません")
+            return
         self._train(ok, 2, 0.45, 0.55, "NN併用学習")
 
     def _nn_cb(self, k, ep, loss, acc):
@@ -435,10 +543,12 @@ class Pipeline:
                     continue
                 w = 0.4 + 0.6 * float(np.clip((s_ - lo) / (hi - lo), 0, 1))
                 items.append((j.X, [(g.unit, g.s, g.e) for g in res.segs if g.e > g.s], w))
-            self.model.fit(items)
-            if self.model.nets:
-                self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
-            self._checkpoint(f"高信頼再学習 {r + 1}/{rounds}")
+            def update(items=items):
+                self.model.fit(items)
+                if self.model.nets:
+                    self.model.fit_net(items, epochs=self.P["net_epochs"], ensemble=self.P["ens"], callback=self._nn_cb)
+
+            accepted, _ = self._guarded_update(update, f"高信頼再学習 {r + 1}/{rounds}")
             self.log(f"    高信頼再学習 {r + 1}/{rounds}: {len(items)}/{len(scored)} ファイル使用")
 
     @staticmethod
@@ -503,7 +613,7 @@ class Pipeline:
         if (self.do_rescue or level) and (best is None or self._need_rescue(best)):
             base = best.score if best else -9.0
             cands = []
-            for v in RESCUE_VARIANTS + (RESCUE_EXTRA if level >= 2 else []):
+            for v in RESCUE_VARIANTS + (TEMPO_VARIANTS if level >= 1 else []) + (RESCUE_EXTRA if level >= 2 else []):
                 cands.append((replace(cfg, **v), j.morae, f"パラメータ {v}"))
             n = len(j.morae)
             for k in range(1, min(3 + level, n - 2) + 1):
@@ -537,6 +647,7 @@ class Pipeline:
             if n not in j.notes:
                 j.notes.append(n)
         j.status = best.status
+        j.decoded_runs = label_runs(best.labels, cfg.hop_ms) if best.labels is not None else []
         j.entries = []
         j.entries = make_entries(j.path.name, j.timings, j.dur_ms, cfg)     # 失敗ファイルも生成 (出力するかは _emit が決める)
         for e in j.entries:
@@ -575,7 +686,7 @@ class Pipeline:
             mdl, LLa = self.model, LLb
         rate = self._rate(good) if good else 1.0
         cur_bad = sum(1 for t in j.timings if STATUS_RANK[t.status] >= 2)
-        variants = [None] + RESCUE_VARIANTS + (RESCUE_EXTRA if level >= 2 else [])
+        variants = [None] + RESCUE_VARIANTS + TEMPO_VARIANTS + (RESCUE_EXTRA if level >= 2 else [])
         for expand in (0, 1, 2):
             aa, bb = max(0, a - expand), min(n - 1, b + expand)
             ip = max([i for i, g in enumerate(segs) if g.mora == aa - 1], default=-1) if aa > 0 else -1
@@ -649,6 +760,9 @@ class Pipeline:
                     self._final(j, level=rnd)       # 区間のやり直しで直らない/整列が無い → ファイル全体を再解析
             fixed = sum(1 for j in todo if not self._is_bad(j))
             self.log(f"    再検査 {rnd} 回目の結果: 解決 {fixed} / 残り {len(todo) - fixed}")
+            if fixed == 0 and rnd >= 3:         # 3 回目までに使える手段は出し尽くしている。同じ試行を繰り返さない
+                self.log("    これ以上の手段がないため再検査を打ち切ります")
+                break
         left = [j for j in pool if j.F is not None and j.morae and self._is_bad(j) and j.rechecks >= limit]
         for j in left:
             j.notes.append(f"{limit} 回再検査しても不合格のため終了" +
@@ -751,7 +865,7 @@ class Pipeline:
                     "vowel_end_ms": round(t.vowel_end, 1), "units": [(u, round(a, 1), round(b, 1)) for u, a, b in t.segs],
                     "recognized_vowel": t.rec_vowel, "recognized_cons": t.rec_cons,
                     "vowel_agreement": round(t.agree_v, 3), "consonant_agreement": round(t.cons_agree, 3),
-                    "boundary_conf": round(t.bconf, 3), "status": t.status, "notes": t.notes} for t in j.timings],
+                    "boundary_conf": round(t.bconf, 3), "devoiced": t.devoiced, "status": t.status, "notes": t.notes} for t in j.timings],
                 "aliases": [{"alias": e.alias, "kind": e.kind, "status": e.status, "confidence": round(e.quality, 3),
                              "valid": e.valid, "line": format_entry(e),
                              "notes": e.notes} for e in j.entries],

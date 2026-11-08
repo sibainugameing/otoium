@@ -2,7 +2,7 @@
 import math
 from dataclasses import dataclass
 import numpy as np
-from .phoneset import UNIT_CLASS, CLASS_PRIOR, DUR_SIGMA
+from .phoneset import UNIT_CLASS, CLASS_PRIOR, DUR_SIGMA, UNVOICED_CONS_UNITS
 
 NEG = -1e18
 
@@ -19,6 +19,8 @@ class Token:
     dmin: int
     dmax: int
     dur_lp: np.ndarray
+    alt: str = None        # 代替ユニット (無声化母音)
+    alt_pen: float = 0.0
 
 
 @dataclass
@@ -52,7 +54,10 @@ def build_tokens(morae, T, hop_ms, cfg, model=None, rate=1.0):
                 sigma = model.dur_sd[unit]
                 dmax_ms = max(dmax_ms, model.dur_max[unit] * rate)
             dmin = max(1, int(math.ceil(dmin_ms / hop_ms)))
+            if getattr(cfg, "min_dur_ratio", 0.0) > 0 and c in ("V", "NN", "N") and not unit.endswith("_dv"):
+                dmin = max(dmin, int(math.ceil(cfg.min_dur_ratio * mean_ms / hop_ms)))     # 整列の潰れ防止
             dmax = min(T, int(math.ceil(dmax_ms / hop_ms)))
+            dmin = min(dmin, dmax)
             d = np.arange(dmax + 1, dtype=float)
             d[0] = 1
             lp = -0.5 * cfg.duration_weight * (np.log(d * hop_ms / mean_ms) / sigma) ** 2
@@ -62,7 +67,11 @@ def build_tokens(morae, T, hop_ms, cfg, model=None, rate=1.0):
     for i, m in enumerate(morae):
         us = m.units
         for j, u in enumerate(us):
-            toks.append(mk(u, i, "v" if j == len(us) - 1 else "c"))
+            tk = mk(u, i, "v" if j == len(us) - 1 else "c")
+            if (j == len(us) - 1 and j > 0 and u in ("i", "u") and us[j - 1] in UNVOICED_CONS_UNITS
+                    and getattr(cfg, "allow_devoiced", False) and model is not None and (u + "_dv") in model.idx):
+                tk.alt, tk.alt_pen = u + "_dv", cfg.devoiced_penalty
+            toks.append(tk)
         if i < len(morae) - 1:
             toks.append(mk("pau", -1, "pau"))
     toks.append(mk("pau", -1, "pau", edge=True))
@@ -84,6 +93,11 @@ def viterbi(LL, idx, toks, bnd, boundary_weight):
         if tok.unit not in cum:
             cum[tok.unit] = np.concatenate(([0.0], np.cumsum(LL[idx[tok.unit]])))
         c = cum[tok.unit]
+        c2 = None
+        if tok.alt:
+            if tok.alt not in cum:
+                cum[tok.alt] = np.concatenate(([0.0], np.cumsum(LL[idx[tok.alt]])))
+            c2 = cum[tok.alt]
         prev = dp[i - 1]
         prevb = prev + bonus
         cur, bk = dp[i], back[i]
@@ -92,7 +106,10 @@ def viterbi(LL, idx, toks, bnd, boundary_weight):
                 cand = prev
             else:
                 cand = np.full(T + 1, NEG)
-                cand[d:] = prevb[:T + 1 - d] + (c[d:] - c[:T + 1 - d]) + tok.dur_lp[d]
+                seg_ll = c[d:] - c[:T + 1 - d]
+                if c2 is not None:           # 通常の母音 / 無声化母音 の良い方を区間ごとに選ぶ
+                    seg_ll = np.maximum(seg_ll, (c2[d:] - c2[:T + 1 - d]) - tok.alt_pen)
+                cand[d:] = prevb[:T + 1 - d] + seg_ll + tok.dur_lp[d]
             better = cand > cur
             if better.any():
                 cur[better] = cand[better]
@@ -104,7 +121,12 @@ def viterbi(LL, idx, toks, bnd, boundary_weight):
     for i in range(N, 0, -1):
         d = int(back[i, e])
         t = toks[i - 1]
-        segs[i - 1] = Seg(t.unit, t.mora, t.kind, e - d, e)
+        unit = t.unit
+        if t.alt and d > 0:
+            a, b = e - d, e
+            if LL[idx[t.alt], a:b].sum() - t.alt_pen > LL[idx[t.unit], a:b].sum():
+                unit = t.alt
+        segs[i - 1] = Seg(unit, t.mora, t.kind, e - d, e)
         e -= d
     return segs, float(dp[N, T])
 

@@ -14,7 +14,7 @@ from .phoneset import UNIT_CLASS
 from .metrics import INFO
 
 STATUS_FG = {"OK": "#1b7f3b", "WARN": "#b7791f", "REVIEW": "#c05621", "ERROR": "#c53030", "FAIL": "#c53030"}
-CLASS_BG = {"V": "#9ec5f4", "NN": "#b4bdf2", "N": "#cdb4f2", "S": "#f4cf9e", "H": "#f4e29e", "Z": "#f4b99e",
+CLASS_BG = {"V": "#9ec5f4", "VU": "#c9dff7", "NN": "#b4bdf2", "N": "#cdb4f2", "S": "#f4cf9e", "H": "#f4e29e", "Z": "#f4b99e",
             "CL": "#d0d0d0", "CLV": "#d8c4c4", "BR": "#f49eb4", "BRV": "#e6a8c8", "RF": "#9ef4dc", "GL": "#9ef4be",
             "PAU": "#eeeeee"}
 MARKS = [("offset", "#c53030"), ("overlap", "#dd8a00"), ("pre", "#1b7f3b"), ("consonant", "#2b6cb0"), ("cutoff", "#7b3fb0")]
@@ -286,6 +286,9 @@ class App(tk.Tk):
             self.V[k] = tk.IntVar(value=val)
         self.V["mode_info"] = tk.StringVar(value="")
         self.V["recheck"] = tk.IntVar(value=3)
+        self.V["result_json"] = tk.BooleanVar(value=False)
+        self.V["result_json_path"] = tk.StringVar(value="")
+        self.V["result_json_detail"] = tk.StringVar(value="full")
         self.V["filter"] = tk.StringVar(value="全て")
         self.V["stage"] = tk.StringVar(value="待機中")
 
@@ -307,7 +310,8 @@ class App(tk.Tk):
             export_labels=v["export_labels"], alias_prefix=v["alias_prefix"], alias_suffix=v["alias_suffix"],
             jobs=max(1, int(v["jobs"] or 1)), recursive=v["recursive"], backup=v["backup"], dedupe=v["dedupe"],
             cache=v["cache"], recheck_rounds=int(v["recheck"]), write_failed=v["write_failed"],
-            partial_repair=v["partial_repair"], skip_unknown_chars=v["skip_unknown_chars"])
+            partial_repair=v["partial_repair"], skip_unknown_chars=v["skip_unknown_chars"],
+            result_json=v["result_json"], result_json_path=v["result_json_path"], result_json_detail=v["result_json_detail"])
 
     # ---------------- 画面 ----------------
     def _build_top(self):
@@ -404,6 +408,15 @@ class App(tk.Tk):
         self._check(g4, "Audacity ラベルを出力", "export_labels", 3, 0)
         self._check(g4, "失敗・保留も oto.ini に書き込む (otoium_forced.txt に一覧)", "write_failed", 4, 0)
         self._check(g4, "失敗モーラ区間だけをやり直す", "partial_repair", 5, 0)
+        self._check(g4, "詳細な実行結果を JSON で書き出す", "result_json", 6, 0)
+        fj = ttk.Frame(g4)
+        fj.grid(row=7, column=0, sticky="we", pady=(0, 2))
+        ttk.Entry(fj, textvariable=self.V["result_json_path"], width=30).pack(side="left", padx=(18, 4))
+        ttk.Button(fj, text="参照…", command=self.pick_json).pack(side="left")
+        ttk.Combobox(fj, textvariable=self.V["result_json_detail"], values=["summary", "standard", "full"], width=9,
+                     state="readonly").pack(side="left", padx=6)
+        ttk.Label(g4, text="パス空欄: <フォルダ>/otoium_result.json。詳細度 full は区間・認識結果・モデル・学習履歴・ログまで含む",
+                  foreground="#6b7280", wraplength=380).grid(row=8, column=0, sticky="w", padx=18)
         bar = ttk.Frame(tab)
         bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=10)
         ttk.Button(bar, text="設定を保存…", command=self.save_settings).pack(side="left")
@@ -475,6 +488,9 @@ class App(tk.Tk):
         b = ttk.Button(bar, text="oto.ini に書き込む", style="Accent.TButton", command=self.write_now)
         b.pack(side="left", padx=(6, 0))
         self.act_buttons.append(b)
+        bj = ttk.Button(bar, text="JSON を書き出す…", command=self.export_json_now)
+        bj.pack(side="left", padx=(6, 0))
+        self.act_buttons.append(bj)
         ttk.Label(bar, text="(エイリアス行のダブルクリックで、そのエイリアスを書く/書かないを個別に切替)",
                   foreground="#6b7280").pack(side="left", padx=10)
         pw = ttk.PanedWindow(tab, orient="horizontal")
@@ -560,6 +576,26 @@ class App(tk.Tk):
         f = filedialog.askopenfilename()
         if f:
             self.V["script"].set(f)
+
+    def pick_json(self):
+        f = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")],
+                                         initialfile="otoium_result.json")
+        if f:
+            self.V["result_json_path"].set(f)
+
+    def export_json_now(self):
+        """実行後の状態(再検査・手動指定の反映後)を JSON に書き出す"""
+        if not self.pipe or not self.pipe.jobs:
+            messagebox.showinfo("otoium", "先に解析を実行してください")
+            return
+        init = self.V["result_json_path"].get() or "otoium_result.json"
+        f = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")],
+                                         initialfile=os.path.basename(init),
+                                         initialdir=os.path.dirname(init) or str(self.pipe.root))
+        if f:
+            detail = self.V["result_json_detail"].get()
+            self._bg(lambda: {"kind": "json", "path": str(self.pipe.export_json(f, detail)), "detail": detail},
+                     "JSON を書き出し中…")
 
     def open_dir(self):
         d = self.V["folder"].get()
@@ -713,6 +749,9 @@ class App(tk.Tk):
                         self.V["stage"].set(f"再検査完了: 解決 {v['fixed']} / 対象 {v['total']}")
                         messagebox.showinfo("otoium", f"再検査: 対象 {v['total']} 件のうち {v['fixed']} 件で不合格箇所が解消しました。\n"
                                                       "反映するには「oto.ini に書き込む」を押してください。")
+                    elif v and v["kind"] == "json":
+                        self.V["stage"].set("JSON 書き出し完了")
+                        messagebox.showinfo("otoium", f"実行結果 ({v['detail']}) を書き出しました:\n{v['path']}")
                     elif v and v["kind"] == "write":
                         r = v["report"]
                         self.V["stage"].set("書き込み完了")

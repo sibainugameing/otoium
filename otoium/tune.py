@@ -7,14 +7,16 @@ from .evaluate import evaluate
 
 GRID = {
     "boundary_weight": [2.0, 4.0, 8.0],
-    "duration_weight": [0.25, 0.5, 1.0],
+    "duration_weight": [0.25, 0.5, 1.0, 2.0, 4.0],
     "pause_penalty": [1.0, 2.0, 4.0],
+    "min_dur_ratio": [0.0, 0.2, 0.35],
 }
 NN_GRID = [0.0, 1.0, 2.0, 4.0]
 FINE_GRID = {
     "boundary_weight": [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0],
-    "duration_weight": [0.15, 0.25, 0.4, 0.5, 0.7, 1.0, 1.5],
+    "duration_weight": [0.15, 0.25, 0.4, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
     "pause_penalty": [0.5, 1.0, 2.0, 3.0, 4.0, 6.0],
+    "min_dur_ratio": [0.0, 0.1, 0.2, 0.3, 0.4],
 }
 FINE_NN = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 

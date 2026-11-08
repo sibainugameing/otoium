@@ -93,10 +93,11 @@ def _vcv(wav, m, prev, wav_ms, cfg):
                    0.5 * (m.cons_start - offset), "VCV", moras=[prev.index, m.index])
     e.cut_len = _vend(m) - offset
     e.status, e.notes = _status([prev, m])
-    if m.gap_before >= 40.0:
+    if m.gap_before >= 40.0 and not m.mora.silent_onset:
+        # 連続音は声を繋げて収録するのが正しい。か行・た行・ぱ行・さ行 など無声子音の前の無音は正常なので警告しない
         if STATUS_RANK[e.status] < 1:
             e.status = "WARN"
-        e.notes.append(f"モーラ間に {m.gap_before:.0f}ms の無音があり、純粋なVCVではありません")
+        e.notes.append(f"モーラ間に {m.gap_before:.0f}ms の無音があり、声が途切れています (連続音は繋げて収録します)")
     e.quality = min(prev.quality, m.quality)
     return _finalize(e, wav_ms)
 

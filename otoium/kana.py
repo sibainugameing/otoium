@@ -1,7 +1,7 @@
 """かな / ローマ字 → モーラ列"""
 import unicodedata
 from dataclasses import dataclass
-from .phoneset import mora_units, cons_units
+from .phoneset import mora_units, cons_units, UNVOICED_CONS_UNITS
 
 V = "aiueo"
 _ROWS = [
@@ -66,6 +66,17 @@ class Mora:
     @property
     def has_cons(self):
         return bool(self.cons)
+
+    @property
+    def silent_onset(self):
+        """無声子音で始まる (か行・た行・ぱ行・さ行・は行 など)。連続音でも発音上の無音/息の区間が入るのが正常"""
+        cu = cons_units(self.cons) if self.cons else []
+        return bool(cu) and cu[0] in UNVOICED_CONS_UNITS
+
+    @property
+    def palatal(self):
+        """拗音・口蓋化子音 (しゅ ちゅ じゅ きゃ ひょ …): 母音の立ち上がりが半母音 (y) に似る"""
+        return any(c in self.kana for c in "ゃゅょ") or self.cons in PAL_SELF or self.cons.endswith("y")
 
 
 def _romaji_table():

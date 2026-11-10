@@ -776,6 +776,99 @@ _ふぇんふぇふぇふぉふぇふぁふぇ _うぃんうぃうぃううぃ�
                 if f["file"][:-4] in BANK:
                     self.assertEqual(broken(f["file"]), ([], []), f["file"])
 
+    # ---- UTAU の仕様 (UTAU wiki / OpenUtau wiki / VCV チュートリアル) との整合 ----
+    def _mt(self, text, vstart=300.0, vend=600.0, cs=250.0, gap=300.0, idx=0):
+        from otoium.verify import MoraTiming
+        m = parse_text(text)[0]
+        return MoraTiming(idx, m, [(m.units[-1], vstart, vend)], cs, vstart, vend, None, gap)
+
+    def test_oto_line_format_matches_utau_spec(self):
+        import re
+        from otoium.oto import format_entry
+        from otoium.aliases import _cv
+        e = _cv("a.wav", self._mt("か"), None, 1000.0, Config(), "か", "CV")
+        line = format_entry(e)
+        # ファイル名=エイリアス,オフセット,子音部,右ブランク(カットオフ),先行発声,オーバーラップ の順 (数値 5 個、指数表記なし)
+        self.assertRegex(line, r"^a\.wav=か(,-?\d+(\.\d+)?){5}$")
+        f = [float(x) for x in line.split("=", 1)[1].split(",")[1:]]
+        offset, consonant, cutoff, pre, overlap = f
+        self.assertEqual((offset, consonant, cutoff, pre, overlap), (e.offset, e.consonant, e.cutoff, e.pre, e.overlap))
+        self.assertLess(cutoff, 0)                           # 負の右ブランク = オフセットからの使用長
+        self.assertGreaterEqual(-cutoff, consonant)          # 固定範囲 (子音部) は使用長の内側
+        self.assertLessEqual(overlap, pre)
+        self.assertGreaterEqual(offset + (-cutoff), 0)
+
+    def test_cv_overlap_follows_utau_row_conventions(self):
+        from otoium.aliases import _cv
+        cfg = Config()                                       # cv_overlap_margin_ms=35
+        ov = lambda t: (lambda e: (e.overlap, e.pre))(_cv("a.wav", self._mt(t), None, 2000.0, cfg, t, "CV"))
+        for t in ("か", "た", "ぱ", "ち", "つ", "きゃ"):        # か行・た行・ぱ行・ち・つ: オーバーラップなし
+            self.assertEqual(ov(t)[0], 0.0, t)
+        for t in ("さ", "は", "な", "ま", "や", "ら", "わ", "が", "ざ"):  # 先行発声の 20〜50ms 手前
+            o, pre = ov(t)
+            self.assertAlmostEqual(pre - o, 35.0, delta=0.01, msg=t)
+            self.assertTrue(20.0 <= pre - o <= 50.0)
+        for t in ("あ", "ん"):                               # あ行: 先行発声と同じ (重ねる)
+            o, pre = ov(t)
+            self.assertEqual(o, pre, t)
+
+    def test_sonorant_rows_get_longer_fixed_range(self):
+        from otoium.aliases import _cv
+        cfg = Config()                                       # fixed_extra_ms=20 / fixed_extra_sonorant_ms=40
+        fx = lambda t: (lambda e: e.consonant - e.pre)(_cv("a.wav", self._mt(t), None, 2000.0, cfg, t, "CV"))
+        for t in ("な", "ま", "や", "ら", "わ"):              # 遷移が完全に終わる所まで長めに (間延び防止)
+            self.assertAlmostEqual(fx(t), 40.0, delta=0.01, msg=t)
+        for t in ("か", "さ", "あ", "が"):
+            self.assertAlmostEqual(fx(t), 20.0, delta=0.01, msg=t)
+
+    def test_vcv_overlap_is_one_third_of_preutterance_inside_the_vowel_tail(self):
+        from otoium.aliases import _vcv
+        from otoium.verify import MoraTiming
+        prev = self._mt("あ", 100.0, 400.0, 100.0, 0.0, 0)
+        cur = self._mt("か", 560.0, 900.0, 400.0, 0.0, 1)    # 子音 160ms
+        e = _vcv("a.wav", cur, prev, 2000.0, Config(vcv_style="mora"))
+        self.assertAlmostEqual(e.overlap, e.pre / 3.0, delta=0.01)
+        self.assertLessEqual(e.overlap, cur.cons_start - e.offset)         # 前の母音の尾の内側
+        self.assertLessEqual(e.overlap, e.pre)
+
+    def test_vcv_alias_styles(self):
+        from otoium.aliases import _vcv
+        prev = self._mt("あ", 100.0, 400.0, 100.0, 0.0, 0)
+        cur = self._mt("か", 560.0, 900.0, 400.0, 0.0, 1)
+        for style, want in (("mora", "あ か"), ("vowel", "あ か"), ("romaji", "a か")):
+            self.assertEqual(_vcv("a.wav", cur, prev, 2000.0, Config(vcv_style=style)).alias, want, style)
+        prev2 = self._mt("ん", 100.0, 400.0, 100.0, 0.0, 0)
+        self.assertEqual(_vcv("a.wav", cur, prev2, 2000.0, Config(vcv_style="romaji")).alias, "n か")
+        self.assertEqual(_vcv("a.wav", cur, prev2, 2000.0, Config(vcv_style="vowel")).alias, "ん か")
+
+    def test_unwritable_entries_are_excluded_not_fatal(self):
+        from otoium.aliases import format_problem, encoding_problem, AliasEntry
+        mk = lambda wav, alias: AliasEntry(wav, alias, 1, 2, -3, 4, 5, "CV")
+        self.assertIsNotNone(format_problem(mk("a.wav", "あ,い")))          # ',' はフィールド区切り
+        self.assertIsNotNone(format_problem(mk("a.wav", "あ=い")))          # '=' は ファイル名=エイリアス の区切り
+        self.assertIsNotNone(format_problem(mk("a=b.wav", "あ")))
+        self.assertIsNone(format_problem(mk("a b.wav", "あ い")))           # 空白は可 (VCV のエイリアス)
+        self.assertIsNotNone(encoding_problem(mk("a.wav", "ゔ"), "cp932"))     # ひらがなの ゔ は cp932 で表せない
+        self.assertIsNone(encoding_problem(mk("a.wav", "ヴ"), "cp932"))
+        self.assertIsNone(encoding_problem(mk("a.wav", "ゔ"), "utf-8"))
+
+    def test_pipeline_survives_cp932_unencodable_alias(self):
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d, BANK[:5])
+            x, _ = render("_ゔ", seed=3)
+            write_wav(Path(d) / "_ゔ.wav", x)                               # alias が cp932 で書けない
+            p, rep = run(d, mode="cv", accuracy="fast", recheck_rounds=0)      # 書き込み全体が失敗しない
+            oto = read_oto(d)
+            self.assertNotIn("_ゔ.wav", oto)
+            self.assertIn("_あかさたな.wav", oto)
+            self.assertTrue(any("cp932" in n for j in p.jobs for e in j.entries for n in e.notes))
+        with tempfile.TemporaryDirectory() as d:
+            make_bank(d, BANK[:5])
+            write_wav(Path(d) / "_ゔ.wav", render("_ゔ", seed=3)[0])
+            run(d, mode="cv", accuracy="fast", recheck_rounds=0, encoding="utf-8")
+            txt = (Path(d) / "oto.ini").read_bytes().decode("utf-8")
+            self.assertIn("_ゔ.wav=ゔ,", txt)                                  # utf-8 なら書ける
+
     def test_resolve_presets(self):
         from otoium.config import resolve
         self.assertFalse(resolve(Config(accuracy="fast"))["net"])

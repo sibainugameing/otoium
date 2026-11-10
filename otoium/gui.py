@@ -348,7 +348,7 @@ class App(tk.Tk):
         ttk.Entry(g1, textvariable=self.V["script"], width=34).grid(row=0, column=1, columnspan=2, sticky="we", pady=3)
         ttk.Button(g1, text="参照…", command=self.pick_script).grid(row=0, column=3, padx=4)
         self._combo(g1, "モード", "mode", ["auto", "cv", "vcv", "cvvc"], 1, 0)
-        self._combo(g1, "VCV表記", "vcv_style", ["mora", "vowel"], 1, 2)
+        self._combo(g1, "VCV表記", "vcv_style", ["mora", "vowel", "romaji"], 1, 2)
         self._combo(g1, "VC表記", "vc_style", ["romaji", "kana"], 2, 0)
         self._combo(g1, "文字コード", "encoding", ["cp932", "utf-8"], 2, 2)
         for i, (lab, key) in enumerate([("先頭の接頭辞", "head_prefix"), ("接頭辞", "alias_prefix"), ("接尾辞", "alias_suffix")]):

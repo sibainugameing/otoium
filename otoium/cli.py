@@ -9,7 +9,8 @@ def build_parser():
     p = argparse.ArgumentParser(prog="otoium", description="otoium: UTAU 原音設定 (oto.ini) 自動生成")
     p.add_argument("folder", nargs="?", help="原音の WAV を含むフォルダ (省略で GUI 起動)")
     p.add_argument("--mode", choices=["auto", "cv", "vcv", "cvvc"], default="auto")
-    p.add_argument("--vcv-style", choices=["mora", "vowel"], default="mora", help="mora: 「か さ」 / vowel: 「あ さ」")
+    p.add_argument("--vcv-style", choices=["mora", "vowel", "romaji"], default="mora",
+                   help="mora: 「か さ」 / vowel: 「あ さ」 / romaji: 「a さ」 (日本語VCVで一般的)")
     p.add_argument("--vc-style", choices=["romaji", "kana"], default="romaji")
     p.add_argument("--head-prefix", default="", help='先頭エイリアスの接頭辞 例: "- "')
     p.add_argument("--tail", action="store_true", help="末尾 'V -' エイリアスも生成")

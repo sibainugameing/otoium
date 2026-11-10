@@ -18,7 +18,7 @@ from .evaluate import evaluate, evaluate_segs
 from .metrics import Tracker
 from .tune import autotune
 from .calibrate import calibrate
-from .aliases import make_entries
+from .aliases import make_entries, encoding_problem
 from .oto import write_oto, format_entry, read_lines
 from .export import write_labels, write_textgrid
 
@@ -784,6 +784,13 @@ class Pipeline:
             for j in js:
                 for e in j.entries:
                     e.forced = False
+                    bad = encoding_problem(e, cfg.encoding)          # 文字コードで書けないエントリは除外 (全体の書き込み失敗を防ぐ)
+                    if bad and e.valid:
+                        e.valid = False
+                        e.notes.append(bad)
+                    if not e.valid:
+                        review.append(e)
+                        continue
                     over = j.status == "FAIL" or STATUS_RANK[e.status] > limit
                     if e.manual is False:
                         review.append(e)

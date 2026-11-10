@@ -6,7 +6,7 @@ from dataclasses import dataclass, asdict
 class Config:
     # ---- 出力形式 ----
     mode: str = "auto"          # auto / cv / vcv / cvvc  (auto: 1モーラ=CV, 複数モーラ=VCV)
-    vcv_style: str = "mora"     # mora: 「か さ」 / vowel: 「あ さ」
+    vcv_style: str = "mora"     # mora: 「か さ」 / vowel: 「あ さ」 / romaji: 「a さ」 (日本語VCVで一般的な表記)
     vc_style: str = "romaji"    # CVVC の VC: romaji「a k」 / kana「あ k」
     head_prefix: str = ""       # 先頭エイリアスの接頭辞 (例 "- ")
     add_tail: bool = False      # 末尾「V -」エイリアスを作る
@@ -42,6 +42,8 @@ class Config:
     vcv_tail_ms: float = 90.0
     vc_tail_ms: float = 70.0
     fixed_extra_ms: float = 20.0
+    fixed_extra_sonorant_ms: float = 40.0   # な行・ま行・や行・ら行・わ行は遷移が終わる所まで固定範囲を長く取る (UTAU wiki)
+    cv_overlap_margin_ms: float = 35.0      # さ行・は行・な行など: オーバーラップは先行発声の 20〜50ms 手前
     # ---- 検証 ----
     thr_contrast: float = 1.5
     thr_bnd: float = 0.6

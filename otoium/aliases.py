@@ -1,6 +1,7 @@
 """エイリアス生成と oto パラメータ算出 (CV / VCV / CVVC)"""
 from dataclasses import dataclass, field
 from .kana import VOWEL_KANA, VOWEL_ROMAJI
+from .phoneset import cons_units
 from .verify import STATUS_RANK
 
 
@@ -30,6 +31,26 @@ def _status(moras_t, extra=None):
     return st, notes
 
 
+def format_problem(e):
+    """oto.ini の行形式 (ファイル名=エイリアス,数値×5) を壊す内容。問題があれば理由を返す"""
+    if "=" in e.wav or "\n" in e.wav:
+        return "WAV ファイル名に '=' や改行があり oto.ini の行形式を壊します (ファイル名を変更してください)"
+    if "," in e.alias or "=" in e.alias or "\n" in e.alias or "\r" in e.alias:
+        return "エイリアスに ',' '=' や改行が含まれ oto.ini の行形式を壊します"
+    return None
+
+
+def encoding_problem(e, encoding):
+    """指定の文字コードで書けない文字を含むか (書き込み全体の失敗を防ぐため、エントリ単位で除外する)"""
+    for field in (e.wav, e.alias):
+        try:
+            field.encode(encoding)
+        except UnicodeEncodeError as ex:
+            return (f"文字 {field[ex.start:ex.end]!r} は文字コード {encoding} で表せません "
+                    f"(--encoding utf-8 を使うか、別の表記にしてください)")
+    return None
+
+
 def _finalize(e, wav_ms):
     e.offset = max(0.0, e.offset)
     e.pre = max(1.0, e.pre)
@@ -46,12 +67,44 @@ def _finalize(e, wav_ms):
             e.notes.append("使用区間が録音長を超えるため生成不可")
     e.cut_len = cut_len
     e.cutoff = -cut_len
+    problem = format_problem(e)
+    if problem:
+        e.valid = False
+        e.status = "ERROR"
+        e.notes.append(problem)
     vals = (e.offset, e.consonant, e.cutoff, e.pre, e.overlap)
     if not all(v == v and abs(v) != float("inf") for v in vals):
         e.valid = False
         e.status = "ERROR"
         e.notes.append("パラメータが数値として不正")
     return e
+
+
+_SONORANT_UNITS = {"nas", "nas_m", "nas_ny", "rf", "gl_y", "gl_w"}
+
+
+def _first_cons_unit(mora):
+    cu = cons_units(mora.cons) if mora.cons else []
+    return cu[0] if cu else None
+
+
+def _fixed_extra(m, cfg, d):
+    """固定範囲 (consonant) の、先行発声より後ろへの延長。な行・ま行・や行・ら行・わ行は
+    「音の遷移が完全に終わった所」まで長めに取らないと発音が間延びする (UTAU wiki)"""
+    base = cfg.fixed_extra_sonorant_ms if _first_cons_unit(m.mora) in _SONORANT_UNITS else cfg.fixed_extra_ms
+    return min(base, 0.5 * d)
+
+
+def _cv_overlap(m, pre, cfg):
+    """CV (単独音・先頭) のオーバーラップ。UTAU wiki の行ごとの目安に従う:
+    あ行/ん: なし or 先行発声と同じ / か行・た行・ぱ行・ち・つ: なし / それ以外 (さ行・は行・な行・ま行・や行・ら行・わ行・濁音):
+    先行発声の 20〜50ms 手前"""
+    first = _first_cons_unit(m.mora)
+    if first is None:
+        return pre
+    if first == "cl":                      # 無声閉鎖・破擦 (k t p ch ts)
+        return 0.0
+    return min(pre, max(0.0, pre - cfg.cv_overlap_margin_ms))
 
 
 def _vend(m):
@@ -69,7 +122,7 @@ def _cv(wav, m, prev, wav_ms, cfg, label, kind):
     offset = cs - lead
     pre = vs - offset
     d = m.vowel_end - vs
-    e = AliasEntry(wav, label, offset, pre + min(cfg.fixed_extra_ms, 0.35 * d), 0.0, pre, min(pre / 3.0, 30.0), kind,
+    e = AliasEntry(wav, label, offset, pre + _fixed_extra(m, cfg, 0.7 * d), 0.0, pre, _cv_overlap(m, pre, cfg), kind,
                    moras=[m.index])
     e.cut_len = _vend(m) - offset
     e.status, e.notes = _status([m])
@@ -88,9 +141,12 @@ def _vcv(wav, m, prev, wav_ms, cfg):
     offset = max(m.cons_start - tail, prev.vowel_start)
     pre = m.vowel_start - offset
     d = m.vowel_end - m.vowel_start
-    p = prev.mora.surface if cfg.vcv_style == "mora" else VOWEL_KANA[prev.mora.vowel]
-    e = AliasEntry(wav, f"{p} {m.mora.surface}", offset, pre + min(cfg.fixed_extra_ms, 0.35 * d), 0.0, pre,
-                   0.5 * (m.cons_start - offset), "VCV", moras=[prev.index, m.index])
+    p = {"mora": prev.mora.surface, "vowel": VOWEL_KANA[prev.mora.vowel],
+         "romaji": VOWEL_ROMAJI[prev.mora.vowel]}[cfg.vcv_style]
+    # オーバーラップは先行発声の 1/3 (VCV の定石)。ただし前の母音の尾 (子音の開始まで) の内側に収める
+    overlap = min(pre / 3.0, max(0.0, m.cons_start - offset))
+    e = AliasEntry(wav, f"{p} {m.mora.surface}", offset, pre + _fixed_extra(m, cfg, 0.7 * d), 0.0, pre,
+                   overlap, "VCV", moras=[prev.index, m.index])
     e.cut_len = _vend(m) - offset
     e.status, e.notes = _status([prev, m])
     if m.gap_before >= 40.0 and not m.mora.silent_onset:
